@@ -57,9 +57,9 @@ class ConverterGUI:
         tk.Entry(root, textvariable=self.out_var, width=40).grid(row=8, column=1)
         tk.Button(root, text="Browse", command=self.browse_outdir).grid(row=8, column=2)
 
-        # UTF-8 checkbox
-        self.utf8_var = tk.BooleanVar()
-        tk.Checkbutton(root, text="UTF-8 Output", variable=self.utf8_var).grid(row=9, column=1, sticky="w")
+        # Big-5 checkbox
+        self.big5_var = tk.BooleanVar()
+        tk.Checkbutton(root, text="Big-5 Output", variable=self.big5_var).grid(row=9, column=1, sticky="w")
 
         # Convert button
         tk.Button(root, text="Convert", command=self.convert).grid(row=10, column=1, pady=10)
@@ -93,7 +93,7 @@ class ConverterGUI:
                 fixed,
                 self.month_var.get(),
                 int(self.seq_var.get() or 1),
-                out_encoding="utf-8" if self.utf8_var.get() else fm_converter.BIG5,
+                out_encoding=fm_converter.BIG5 if self.big5_var.get() else fm_converter.ENCODING,
                 outdir=Path(self.out_var.get()),
             )
             messagebox.showinfo("Success", "Conversion completed")

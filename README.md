@@ -11,26 +11,22 @@ Two interfaces are provided:
 
 * Python 3.10+
 * `pandas`
-* `chardet`
 * `tkinter` (bundled with Python)
 
 Install dependencies with:
 
 ```bash
-pip install pandas chardet
+pip install pandas
 ```
 
 ## Command line usage
 
 ```bash
-python fm_converter.py --long long.csv --short short.csv
+python fm_converter.py --long long.csv --short short.csv [--big5]
 ```
 
-Use the `--utf8` flag if your text editor cannot display Big‑5 encoded
-Chinese characters.
-
-If the CSV files were accidentally decoded in MacRoman (common on macOS), the
-converter will now try to recover the original Big‑5 text automatically.
+All input CSV files must be UTF‑8 encoded. The output `FM.txt` will be UTF‑8 by
+default; pass `--big5` to generate Big‑5 encoded output instead.
 
 The script will prompt for the constant parameters (PLAN_NO, BRANCH_CODE,
 etc.) and create one or more `FM.txt` files in the `output/` directory by
@@ -45,7 +41,7 @@ python fm_converter_gui.py
 ```
 
 The GUI allows you to select the input files and output directory using file
-dialogs.
+dialogs. Enable the **Big‑5 Output** checkbox if you need legacy encoding.
 
 ### Building an executable
 
