@@ -29,6 +29,9 @@ python fm_converter.py --long long.csv --short short.csv
 Use the `--utf8` flag if your text editor cannot display Big‑5 encoded
 Chinese characters.
 
+If the CSV files were accidentally decoded in MacRoman (common on macOS), the
+converter will now try to recover the original Big‑5 text automatically.
+
 The script will prompt for the constant parameters (PLAN_NO, BRANCH_CODE,
 etc.) and create one or more `FM.txt` files in the `output/` directory by
 default.
