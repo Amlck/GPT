@@ -229,7 +229,10 @@ def convert(
         if old in merged.columns:
             merged.rename(columns={old: new}, inplace=True)
     # Drop any other duplicate-suffixed columns to avoid confusion
+
     merged = merged[[c for c in merged.columns if not c.endswith(("_x", "_y"))]]
+    # Ensure one record per patient
+    merged.drop_duplicates(subset="身分證號", inplace=True)
 
     # Sort by ID for deterministic output
     merged.sort_values("身分證號", inplace=True)
