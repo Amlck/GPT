@@ -136,7 +136,7 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = BIG5) ->
         "NAME": row.get("姓名", ""),
         "SEX": str(row.get("身分證號", ""))[1] if row.get("身分證號", "") else "",
         "INFORM_ADDR": row.get("住址", ""),
-        "TEL": str(row.get("電話", "")),
+        "TEL": _clean_tel(row.get("電話", "")),
         "PRSN_ID": fixed["PRSN_ID"],
         "CASE_TYPE": CASE_TYPE_MAP.get(case_num, "B"),
         "CASE_DATE": roc_to_gregorian(first_visit[:7]),  # first visit of year
@@ -188,6 +188,20 @@ def _clean_id(value: str) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip().lstrip("'").rstrip("'").upper()
+
+def _clean_tel(value: str) -> str:
+    """Ensure telephone numbers keep their leading zero if missing."""
+    if value is None:
+        return ""
+    s = str(value).strip()
+    # Remove any trailing .0 from numbers that may have been parsed as floats
+    if s.endswith(".0"):
+        head = s[:-2]
+        if head.isdigit():
+            s = head
+    if s and not s.startswith("0"):
+        s = "0" + s
+    return s
 
 def merge_sources(long_df, short_df):
     long_df["ID_CLEAN"] = long_df["身分證字號"].apply(_clean_id)
