@@ -27,15 +27,9 @@ incomplete rows. Rows that cannot be converted are dropped from the output.
 """
 
 import argparse
-import csv
 import logging
-import math
-import os
-import sys
-from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import chardet  # type: ignore
 import pandas as pd
@@ -151,35 +145,24 @@ def chunks(lst: List[pd.Series], n: int):
         yield lst[i : i + n]
 
 
-def main():
-    p = argparse.ArgumentParser(description="Convert Family Physician CSVs to FM.txt upload format")
-    p.add_argument("--long", required=True, type=Path, help="Path to long.CSV (demographics)")
-    p.add_argument("--short", required=True, type=Path, help="Path to short.csv (case meta)")
-    p.add_argument("--utf8", action="store_true", help="Write output in UTF‑8 instead of Big‑5")
-    p.add_argument("--outdir", type=Path, default=Path("output"), help="Destination directory")
+def convert(
+    long_path: Path,
+    short_path: Path,
+    fixed: Dict[str, str],
+    upload_month: str,
+    seq_start: int,
+    out_encoding: str = BIG5,
+    outdir: Path = Path("output"),
+) -> List[Path]:
+    """Convert CSVs and write FM.txt file(s)."""
 
-    args = p.parse_args()
-    out_encoding = "utf‑8" if args.utf8 else BIG5
-
-    logging.basicConfig(filename="fm_converter.log", level=logging.INFO, format="%(levelname)s:%(message)s")
-
-    # === Operator prompts ====================================================
-    fixed: Dict[str, str] = {}
-    fixed["PLAN_NO"] = input("Enter PLAN_NO (e.g. 09): ").zfill(2)
-    fixed["BRANCH_CODE"] = input("Enter BRANCH_CODE (1‑6): ")
-    fixed["HOSP_ID"] = input("Enter HOSP_ID (10 digits): ").zfill(10)
-    fixed["PRSN_ID"] = input("Enter PRSN_ID (10 digits physician ID): ").zfill(10)
-    upload_month = input("Enter upload month MM (01‑12): ")
-    seq_start = int(input("Start sequence NN (01‑99) [default 1]: ") or 1)
-
-    # === Load & merge CSVs ====================================================
-    long_df = load_csv(args.long)
-    short_df = load_csv(args.short)
+    long_df = load_csv(long_path)
+    short_df = load_csv(short_path)
     merged = merge_sources(long_df, short_df)
 
     # Sort by ID for deterministic output
     merged.sort_values("身分證號", inplace=True)
-    records = []
+    records: List[bytes] = []
 
     for _, row in merged.iterrows():
         try:
@@ -190,18 +173,58 @@ def main():
 
     if not records:
         logging.error("No valid rows – nothing to write!")
-        sys.exit(1)
+        raise ValueError("No valid rows to write")
 
-    args.outdir.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    # Split into chunks if >9999 rows per file
+    written: List[Path] = []
     CHUNK_SIZE = 9999
     for idx, chunk in enumerate(chunks(records, CHUNK_SIZE), start=seq_start):
         fname = f"{fixed['BRANCH_CODE']}{fixed['HOSP_ID']}{upload_month}{idx:02d}FM.txt"
-        with (args.outdir / fname).open("wb") as fh:
+        fpath = outdir / fname
+        with fpath.open("wb") as fh:
             for rec in chunk:
                 fh.write(rec + b"\r\n")  # CRLF per spec
+        written.append(fpath)
         print(f"Wrote {len(chunk):,} rows to {fname}")
+
+    return written
+
+
+def main(argv: List[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description="Convert Family Physician CSVs to FM.txt upload format")
+    p.add_argument("--long", required=True, type=Path, help="Path to long.CSV (demographics)")
+    p.add_argument("--short", required=True, type=Path, help="Path to short.csv (case meta)")
+    p.add_argument("--utf8", action="store_true", help="Write output in UTF‑8 instead of Big‑5")
+    p.add_argument("--outdir", type=Path, default=Path("output"), help="Destination directory")
+
+    args = p.parse_args(argv)
+    out_encoding = "utf-8" if args.utf8 else BIG5
+
+    logging.basicConfig(
+        filename="fm_converter.log",
+        level=logging.INFO,
+        format="%(levelname)s:%(message)s",
+    )
+
+    # === Operator prompts ====================================================
+    fixed: Dict[str, str] = {}
+    fixed["PLAN_NO"] = input("Enter PLAN_NO (e.g. 09): ").zfill(2)
+    fixed["BRANCH_CODE"] = input("Enter BRANCH_CODE (1‑6): ")
+    fixed["HOSP_ID"] = input("Enter HOSP_ID (10 digits): ").zfill(10)
+    fixed["PRSN_ID"] = input("Enter PRSN_ID (10 digits physician ID): ").zfill(10)
+    upload_month = input("Enter upload month MM (01‑12): ")
+    seq_start = int(input("Start sequence NN (01‑99) [default 1]: ") or 1)
+
+    convert(
+        args.long,
+        args.short,
+        fixed,
+        upload_month,
+        seq_start,
+        out_encoding=out_encoding,
+        outdir=args.outdir,
+    )
 
 
 if __name__ == "__main__":
