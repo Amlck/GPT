@@ -90,20 +90,19 @@ def pad(field: str, length: int, encoding: str = ENCODING) -> bytes:
 def _fw(value: str, width: int, align: str = "l", enc: str = ENCODING) -> bytes:
     """Encode ``value`` in ``enc`` and pad/truncate to ``width`` bytes.
 
-    When ``enc`` is Big‑5 and ``value`` contains characters outside of that
-    encoding, we attempt to recover by interpreting the text as MacRoman bytes
-    and decoding those bytes as Big‑5. This mirrors behaviour when Big‑5 was the
-    default output encoding.
+    The converter occasionally receives text that was originally Big‑5 encoded
+    but got decoded using MacRoman. To recover such garbled strings we attempt
+    the MacRoman→Big‑5 round trip before final encoding. This is done
+    irrespective of the target encoding so both UTF‑8 and Big‑5 outputs benefit.
     """
 
-    if enc == BIG5:
-        try:
-            value.encode(BIG5)
-        except UnicodeEncodeError:
-            try:
-                value = value.encode("macroman").decode(BIG5)
-            except Exception:
-                pass
+    try:
+        # If ``value`` was mis‑decoded from Big‑5 using MacRoman, this will
+        # restore the correct characters. ASCII input is unaffected and
+        # UnicodeEncodeError is ignored for already‑decoded text.
+        value = value.encode("macroman").decode(BIG5)
+    except Exception:
+        pass
 
     raw = value.encode(enc, errors="replace")[:width]
     pad = b" " * (width - len(raw))
@@ -138,25 +137,22 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = ENCODING
     }
 
     # Build fixed‑width line
-    parts: List[bytes] = []
-    for name, size in FIELD_SPECS:
-        parts.append(pad(values.get(name, ""), size, encoding))
     record = b"".join([
-        _fw(values["SEGMENT"], 1),
-        _fw(values["PLAN_NO"], 2, "r"),
-        _fw(values["BRANCH_CODE"], 1),
-        _fw(values["HOSP_ID"], 10, "r"),
-        _fw(values["ID"], 10),
-        _fw(values["BIRTHDAY"], 8, "r"),
-        _fw(values["NAME"], 12),
-        _fw(values["SEX"], 1),
-        _fw(values["INFORM_ADDR"], 120),
-        _fw(values["TEL"], 15),
-        _fw(values["PRSN_ID"], 10, "r"),
-        _fw(values["CASE_TYPE"], 1),
-        _fw(values["CASE_DATE"], 8, "r"),
-        _fw(values["CLOSE_DATE"], 8, "r"),
-        _fw(values["CLOSE_RSN"], 1),
+        _fw(values["SEGMENT"], 1, enc=encoding),
+        _fw(values["PLAN_NO"], 2, "r", enc=encoding),
+        _fw(values["BRANCH_CODE"], 1, enc=encoding),
+        _fw(values["HOSP_ID"], 10, "r", enc=encoding),
+        _fw(values["ID"], 10, enc=encoding),
+        _fw(values["BIRTHDAY"], 8, "r", enc=encoding),
+        _fw(values["NAME"], 12, enc=encoding),
+        _fw(values["SEX"], 1, enc=encoding),
+        _fw(values["INFORM_ADDR"], 120, enc=encoding),
+        _fw(values["TEL"], 15, enc=encoding),
+        _fw(values["PRSN_ID"], 10, "r", enc=encoding),
+        _fw(values["CASE_TYPE"], 1, enc=encoding),
+        _fw(values["CASE_DATE"], 8, "r", enc=encoding),
+        _fw(values["CLOSE_DATE"], 8, "r", enc=encoding),
+        _fw(values["CLOSE_RSN"], 1, enc=encoding),
     ])
     assert len(record) == RECORD_LEN, f"Record len {len(record)} ≠ 208"
     return record
