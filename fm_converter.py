@@ -95,11 +95,24 @@ def pad(field: str, length: int, encoding: str = BIG5) -> bytes:
     return encoded.ljust(length, b" ")
 
 def _fw(value: str, width: int, align: str = "l", enc: str = BIG5) -> bytes:
+    """Encode ``value`` in ``enc`` and pad/truncate to ``width`` bytes.
+
+    When ``enc`` is Big‑5 and ``value`` contains characters outside of that
+    encoding, we try to recover by interpreting the text as MacRoman bytes and
+    then decoding those bytes as Big‑5. This handles the common scenario where
+    Big‑5 data was mistakenly read using MacRoman on macOS.
     """
-    Return `value` encoded in `enc`, padded/truncated to `width` bytes.
-    align = 'l' → left-align (pad on right); 'r' → right-align.
-    """
-    raw = value.encode(enc, errors="replace")[:width]        # truncate
+
+    if enc == BIG5:
+        try:
+            value.encode(BIG5)
+        except UnicodeEncodeError:
+            try:
+                value = value.encode("macroman").decode(BIG5)
+            except Exception:
+                pass
+
+    raw = value.encode(enc, errors="replace")[:width]
     pad = b" " * (width - len(raw))
     return raw + pad if align == "l" else pad + raw
 
