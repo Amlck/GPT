@@ -131,7 +131,11 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = BIG5) ->
 
 def load_csv(path: Path) -> pd.DataFrame:
     enc = detect_encoding(path)
-    return pd.read_csv(path, encoding=enc)
+    # Invalid bytes occasionally slip through in otherwise Big-5 files.
+    # Read using Python's builtin open() so we can replace undecodable
+    # characters instead of raising UnicodeDecodeError.
+    with path.open("r", encoding=enc, errors="replace", newline="") as fh:
+        return pd.read_csv(fh)
 
 
 def merge_sources(long_df: pd.DataFrame, short_df: pd.DataFrame) -> pd.DataFrame:
