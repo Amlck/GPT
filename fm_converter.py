@@ -5,7 +5,7 @@ from the pair of source CSVs provided by Taiwan NHI.
 
 Usage
 -----
-$ python fm_converter.py --long long.CSV --short short.csv [options]
+$ python fm_converter.py --long long.CSV --short short.csv [--big5]
 
 The script will prompt the operator for the constant parameters that apply to
 **all** rows in the output file and then generate one or more fixed‑width text
@@ -13,7 +13,7 @@ files ready for upload.
 
 Requirements (extracted from QM_UploadFormatFM.pdf)
 --------------------------------------------------
-• Output encoding: default Big‑5 (override with --utf8)
+• Output encoding: UTF‑8 (override with --big5)
 • Record length: 208 bytes, 15 fields
 • File name: [BRANCH][HOSP_ID][MM][NN]FM.txt
   – BRANCH, MM, NN are provided by the operator
@@ -31,7 +31,6 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
-import chardet  # type: ignore
 import pandas as pd
 
 ###############################################################################
@@ -39,6 +38,7 @@ import pandas as pd
 ###############################################################################
 
 RECORD_LEN = 208  # bytes
+ENCODING = "utf-8"  # default output encoding
 BIG5 = "big5"
 
 FIELD_SPECS = [
@@ -70,13 +70,6 @@ CASE_TYPE_MAP = {
 }
 
 
-def detect_encoding(path: Path) -> str:
-    """Detect file encoding using chardet (fallback utf‑8)."""
-    with path.open("rb") as fh:
-        raw = fh.read(4096)
-    res = chardet.detect(raw)
-    return res["encoding"] or "utf‑8"
-
 
 def roc_to_gregorian(roc_date: str) -> str:
     """Convert ROC YYYYMMDD (year may be 2‑3 digits) → Gregorian YYYYMMDD."""
@@ -87,20 +80,20 @@ def roc_to_gregorian(roc_date: str) -> str:
     return f"{year:04d}{roc_date[-4:]}"
 
 
-def pad(field: str, length: int, encoding: str = BIG5) -> bytes:
-    """Left align (Big‑5 byte count) and space‑pad/truncate to length."""
+def pad(field: str, length: int, encoding: str = ENCODING) -> bytes:
+    """Left align (byte count) and space‑pad/truncate to length."""
     encoded = field.encode(encoding, errors="ignore")
     if len(encoded) > length:
         encoded = encoded[:length]
     return encoded.ljust(length, b" ")
 
-def _fw(value: str, width: int, align: str = "l", enc: str = BIG5) -> bytes:
+def _fw(value: str, width: int, align: str = "l", enc: str = ENCODING) -> bytes:
     """Encode ``value`` in ``enc`` and pad/truncate to ``width`` bytes.
 
     When ``enc`` is Big‑5 and ``value`` contains characters outside of that
-    encoding, we try to recover by interpreting the text as MacRoman bytes and
-    then decoding those bytes as Big‑5. This handles the common scenario where
-    Big‑5 data was mistakenly read using MacRoman on macOS.
+    encoding, we attempt to recover by interpreting the text as MacRoman bytes
+    and decoding those bytes as Big‑5. This mirrors behaviour when Big‑5 was the
+    default output encoding.
     """
 
     if enc == BIG5:
@@ -116,7 +109,7 @@ def _fw(value: str, width: int, align: str = "l", enc: str = BIG5) -> bytes:
     pad = b" " * (width - len(raw))
     return raw + pad if align == "l" else pad + raw
 
-def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = BIG5) -> bytes:
+def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = ENCODING) -> bytes:
     """Assemble one 208‑byte record from merged DataFrame row + fixed fields."""
 
     try:
@@ -174,11 +167,8 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = BIG5) ->
 ###############################################################################
 
 def load_csv(path: Path) -> pd.DataFrame:
-    enc = detect_encoding(path)
-    # Invalid bytes occasionally slip through in otherwise Big-5 files.
-    # Read using Python's builtin open() so we can replace undecodable
-    # characters instead of raising UnicodeDecodeError.
-    with path.open("r", encoding=enc, errors="replace", newline="") as fh:
+    """Read UTF‑8 encoded CSV file."""
+    with path.open("r", encoding="utf-8", newline="") as fh:
         return pd.read_csv(fh)
 
 def _clean_id(value: str) -> str:
@@ -232,7 +222,7 @@ def convert(
     fixed: Dict[str, str],
     upload_month: str,
     seq_start: int,
-    out_encoding: str = BIG5,
+    out_encoding: str = ENCODING,
     outdir: Path = Path("output"),
 ) -> List[Path]:
     """Convert CSVs and write FM.txt file(s)."""
@@ -296,11 +286,11 @@ def main(argv: List[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Convert Family Physician CSVs to FM.txt upload format")
     p.add_argument("--long", required=True, type=Path, help="Path to long.CSV (demographics)")
     p.add_argument("--short", required=True, type=Path, help="Path to short.csv (case meta)")
-    p.add_argument("--utf8", action="store_true", help="Write output in UTF‑8 instead of Big‑5")
+    p.add_argument("--big5", action="store_true", help="Write output in Big-5 instead of UTF-8")
     p.add_argument("--outdir", type=Path, default=Path("output"), help="Destination directory")
 
     args = p.parse_args(argv)
-    out_encoding = "utf-8" if args.utf8 else BIG5
+    out_encoding = BIG5 if args.big5 else ENCODING
 
     logging.basicConfig(
         filename="fm_converter.log",
