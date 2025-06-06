@@ -94,24 +94,39 @@ def pad(field: str, length: int, encoding: str = BIG5) -> bytes:
         encoded = encoded[:length]
     return encoded.ljust(length, b" ")
 
+def _fw(value: str, width: int, align: str = "l", enc: str = BIG5) -> bytes:
+    """
+    Return `value` encoded in `enc`, padded/truncated to `width` bytes.
+    align = 'l' → left-align (pad on right); 'r' → right-align.
+    """
+    raw = value.encode(enc, errors="replace")[:width]        # truncate
+    pad = b" " * (width - len(raw))
+    return raw + pad if align == "l" else pad + raw
 
 def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = BIG5) -> bytes:
     """Assemble one 208‑byte record from merged DataFrame row + fixed fields."""
 
+    try:
+        birthday_roc = str(row.get("生日", "")).strip()
+        first_visit = str(row.get("看診日期", "")).strip()
+    except Exception as err:
+        raise ValueError(f"Missing birthday or visit date: {err}")
+    _raw_case = str(row.get("個案類別", "")).strip().lstrip("'")
+    case_num  = int(_raw_case) if _raw_case.isdigit() else 0
     values: Dict[str, str] = {
         "SEGMENT": "A",  # all new/open cases for now
         "PLAN_NO": fixed["PLAN_NO"],
         "BRANCH_CODE": fixed["BRANCH_CODE"],
         "HOSP_ID": fixed["HOSP_ID"],
-        "ID": row["身分證號"],
-        "BIRTHDAY": roc_to_gregorian(str(row["生日"])),
-        "NAME": row["姓名"],
-        "SEX": str(row["身分證號"])[1],
-        "INFORM_ADDR": row["住址"],
-        "TEL": str(row["電話"]),
+        "ID": row.get("身分證號", ""),
+        "BIRTHDAY": roc_to_gregorian(birthday_roc),
+        "NAME": row.get("姓名", ""),
+        "SEX": str(row.get("身分證號", ""))[1] if row.get("身分證號", "") else "",
+        "INFORM_ADDR": row.get("住址", ""),
+        "TEL": str(row.get("電話", "")),
         "PRSN_ID": fixed["PRSN_ID"],
-        "CASE_TYPE": CASE_TYPE_MAP.get(int(row["個案類別"]), "B"),
-        "CASE_DATE": roc_to_gregorian(str(row["看診日期"][:7])),  # first visit of year
+        "CASE_TYPE": CASE_TYPE_MAP.get(case_num, "B"),
+        "CASE_DATE": roc_to_gregorian(first_visit[:7]),  # first visit of year
         "CLOSE_DATE": "",  # not used in segment A
         "CLOSE_RSN": "",  # not used in segment A
     }
@@ -120,7 +135,23 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = BIG5) ->
     parts: List[bytes] = []
     for name, size in FIELD_SPECS:
         parts.append(pad(values.get(name, ""), size, encoding))
-    record = b"".join(parts)
+    record = b"".join([
+        _fw(values["SEGMENT"], 1),
+        _fw(values["PLAN_NO"], 2, "r"),
+        _fw(values["BRANCH_CODE"], 1),
+        _fw(values["HOSP_ID"], 10, "r"),
+        _fw(values["ID"], 10),
+        _fw(values["BIRTHDAY"], 8, "r"),
+        _fw(values["NAME"], 12),
+        _fw(values["SEX"], 1),
+        _fw(values["INFORM_ADDR"], 120),
+        _fw(values["TEL"], 15),
+        _fw(values["PRSN_ID"], 10, "r"),
+        _fw(values["CASE_TYPE"], 1),
+        _fw(values["CASE_DATE"], 8, "r"),
+        _fw(values["CLOSE_DATE"], 8, "r"),
+        _fw(values["CLOSE_RSN"], 1),
+    ])
     assert len(record) == RECORD_LEN, f"Record len {len(record)} ≠ 208"
     return record
 
@@ -137,10 +168,29 @@ def load_csv(path: Path) -> pd.DataFrame:
     with path.open("r", encoding=enc, errors="replace", newline="") as fh:
         return pd.read_csv(fh)
 
+def _clean_id(value: str) -> str:
+    """
+    Strip whitespace & leading / trailing apostrophes, make uppercase.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lstrip("'").rstrip("'").upper()
 
-def merge_sources(long_df: pd.DataFrame, short_df: pd.DataFrame) -> pd.DataFrame:
-    merged = pd.merge(short_df, long_df, left_on="身分證號", right_on="身分證字號", how="left")
+def merge_sources(long_df, short_df):
+    long_df["ID_CLEAN"] = long_df["身分證字號"].apply(_clean_id)
+    short_df["ID_CLEAN"] = short_df["身分證號"].apply(_clean_id)
+    merged = pd.merge(short_df, long_df, on="ID_CLEAN", how="inner")
+    print("─" * 60)
+    print("long unique IDs:", long_df["ID_CLEAN"].nunique())
+    print("short unique IDs:", short_df["ID_CLEAN"].nunique())
+    common = set(long_df["ID_CLEAN"]) & set(short_df["ID_CLEAN"])
+    print("common IDs:", len(common))
+    print("sample:", list(common)[:5])
+    print("─" * 60)
+    if merged.empty:
+        raise ValueError("No matching IDs …")
     return merged
+
 
 
 def chunks(lst: List[pd.Series], n: int):
@@ -163,6 +213,23 @@ def convert(
     long_df = load_csv(long_path)
     short_df = load_csv(short_path)
     merged = merge_sources(long_df, short_df)
+
+    # Consolidate duplicate columns created by the merge
+    # long.CSV demographics are kept; short.csv columns get dropped.
+    keep_map = {
+        "姓名_x": "姓名",
+        "生日_x": "生日",
+        "住址_x": "住址",
+        "電話_x": "電話",
+        "身分證號": "身分證號",   # already unique
+        "個案類別": "個案類別",   # comes from short.csv
+        "看診日期": "看診日期",   # from long.csv
+    }
+    for old, new in keep_map.items():
+        if old in merged.columns:
+            merged.rename(columns={old: new}, inplace=True)
+    # Drop any other duplicate-suffixed columns to avoid confusion
+    merged = merged[[c for c in merged.columns if not c.endswith(("_x", "_y"))]]
 
     # Sort by ID for deterministic output
     merged.sort_values("身分證號", inplace=True)
