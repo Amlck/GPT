@@ -1,3 +1,5 @@
+"""Tkinter GUI to run the CSV to FM text conversion provided by :mod:`fm_converter`."""
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from pathlib import Path
@@ -99,12 +101,10 @@ class ConverterGUI:
             )
             messagebox.showinfo("Success", "Conversion completed")
         except Exception as exc:
-            # --- CHANGE THESE TWO LINES ---
             print("\n--- ERROR TRACEBACK ---")
             traceback.print_exc()  # This will print the full traceback to your console
             print("------------------------\n")
             messagebox.showerror("Error", "An unexpected error occurred. Check console for details.")
-            # --- END CHANGE ---
 
 
 def main() -> None:
