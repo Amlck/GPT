@@ -54,3 +54,8 @@ pyinstaller --onefile --noconsole fm_converter_gui.py
 ```
 
 The resulting binary will be located in the `dist/` folder.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
