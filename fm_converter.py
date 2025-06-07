@@ -5,7 +5,7 @@ from the pair of source CSVs provided by Taiwan NHI.
 
 Usage
 -----
-$ python fm_converter.py --long long.CSV --short short.csv [--big5]
+$ python fm_converter.py --long long.CSV --short short.csv [options]
 
 The script will prompt the operator for the constant parameters that apply to
 **all** rows in the output file and then generate one or more fixed‑width text
@@ -13,7 +13,7 @@ files ready for upload.
 
 Requirements (extracted from QM_UploadFormatFM.pdf)
 --------------------------------------------------
-• Output encoding: UTF‑8 (override with --big5)
+• Output encoding: default Big‑5 (override with --utf8)
 • Record length: 208 bytes, 15 fields
 • File name: [BRANCH][HOSP_ID][MM][NN]FM.txt
   – BRANCH, MM, NN are provided by the operator
@@ -30,7 +30,9 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Dict, List
+import io  # <--- Ensure this import is here
 
+import chardet  # type: ignore
 import pandas as pd
 
 ###############################################################################
@@ -39,7 +41,7 @@ import pandas as pd
 
 RECORD_LEN = 208  # bytes
 ENCODING = "utf-8"  # default output encoding
-BIG5 = "big5"
+BIG5 = "cp950"  # Changed from "big5" to "cp950" for consistency and robustness
 
 FIELD_SPECS = [
     ("SEGMENT", 1),
@@ -70,6 +72,13 @@ CASE_TYPE_MAP = {
 }
 
 
+def detect_encoding(path: Path) -> str:
+    """Detect file encoding using chardet (fallback utf‑8)."""
+    with path.open("rb") as fh:
+        raw = fh.read(4096)  # Read a chunk to detect encoding
+    res = chardet.detect(raw)
+    return res["encoding"] or "utf-8"
+
 
 def roc_to_gregorian(roc_date: str) -> str:
     """Convert ROC YYYYMMDD (year may be 2‑3 digits) → Gregorian YYYYMMDD."""
@@ -87,48 +96,40 @@ def pad(field: str, length: int, encoding: str = ENCODING) -> bytes:
         encoded = encoded[:length]
     return encoded.ljust(length, b" ")
 
+
 def _fw(value: str, width: int, align: str = "l", enc: str = ENCODING) -> bytes:
-    """Encode ``value`` in ``enc`` and pad/truncate to ``width`` bytes.
+    # Ensure value is always a string to prevent 'float' object has no attribute 'encode'
+    s_value = str(value)
 
-    The converter occasionally receives text that was originally Big‑5 encoded
-    but got decoded using MacRoman. To recover such garbled strings we attempt
-    the MacRoman→Big‑5 round trip before final encoding. This is done
-    irrespective of the target encoding so both UTF‑8 and Big‑5 outputs benefit.
-    """
-
-    try:
-        # If ``value`` was mis‑decoded from Big‑5 using MacRoman, this will
-        # restore the correct characters. ASCII input is unaffected and
-        # UnicodeEncodeError is ignored for already‑decoded text.
-        value = value.encode("macroman").decode(BIG5)
-    except Exception:
-        pass
-
-    raw = value.encode(enc, errors="replace")[:width]
+    # Encode and handle errors by replacing unknown characters with '?'
+    # This is the proper place for errors='replace'
+    raw = s_value.encode(enc, errors="replace")[:width]
     pad = b" " * (width - len(raw))
     return raw + pad if align == "l" else pad + raw
+
 
 def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = ENCODING) -> bytes:
     """Assemble one 208‑byte record from merged DataFrame row + fixed fields."""
 
     try:
+        # Ensure all values from row.get() are explicitly converted to string
         birthday_roc = str(row.get("生日", "")).strip()
         first_visit = str(row.get("看診日期", "")).strip()
     except Exception as err:
-        raise ValueError(f"Missing birthday or visit date: {err}")
+        raise ValueError(f"Missing birthday or or visit date: {err}")
     _raw_case = str(row.get("個案類別", "")).strip().lstrip("'")
-    case_num  = int(_raw_case) if _raw_case.isdigit() else 0
+    case_num = int(_raw_case) if _raw_case.isdigit() else 0
     values: Dict[str, str] = {
         "SEGMENT": "A",  # all new/open cases for now
         "PLAN_NO": fixed["PLAN_NO"],
         "BRANCH_CODE": fixed["BRANCH_CODE"],
         "HOSP_ID": fixed["HOSP_ID"],
-        "ID": row.get("身分證號", ""),
+        "ID": str(row.get("身分證號", "")),  # Ensure string
         "BIRTHDAY": roc_to_gregorian(birthday_roc),
-        "NAME": row.get("姓名", ""),
-        "SEX": str(row.get("身分證號", ""))[1] if row.get("身分證號", "") else "",
-        "INFORM_ADDR": row.get("住址", ""),
-        "TEL": _clean_tel(row.get("電話", "")),
+        "NAME": str(row.get("姓名", "")),  # Ensure string
+        "SEX": str(row.get("身分證號", ""))[1] if str(row.get("身分證號", "")) else "",  # Ensure string
+        "INFORM_ADDR": str(row.get("住址", "")),  # Ensure string
+        "TEL": _clean_tel(str(row.get("電話", ""))),  # _clean_tel already does str(), but double check for robustness
         "PRSN_ID": fixed["PRSN_ID"],
         "CASE_TYPE": CASE_TYPE_MAP.get(case_num, "B"),
         "CASE_DATE": roc_to_gregorian(first_visit[:7]),  # first visit of year
@@ -137,6 +138,7 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = ENCODING
     }
 
     # Build fixed‑width line
+
     record = b"".join([
         _fw(values["SEGMENT"], 1, enc=encoding),
         _fw(values["PLAN_NO"], 2, "r", enc=encoding),
@@ -163,9 +165,50 @@ def build_record(row: pd.Series, fixed: Dict[str, str], encoding: str = ENCODING
 ###############################################################################
 
 def load_csv(path: Path) -> pd.DataFrame:
-    """Read UTF‑8 encoded CSV file."""
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        return pd.read_csv(fh)
+    """Read CSV file, attempting to decode with fallbacks and error handling."""
+    encodings_to_try = [
+        "utf-8-sig",  # Prioritize UTF-8 with BOM (common from Excel)
+        "utf-8",  # Then plain UTF-8
+        "cp950",  # Big-5 for Traditional Chinese
+        "big5",  # Python's alias for big5 (often cp950)
+        detect_encoding(path),  # Chardet's best guess as a fallback
+        "gbk",  # Simplified Chinese
+        "latin-1",  # Last resort
+    ]
+
+    try:
+        with path.open("rb") as f_raw:
+            raw_bytes = f_raw.read()
+    except Exception as e:
+        raise ValueError(f"Error reading raw bytes from {path.name}: {e}")
+
+    attempted_encodings = set()
+    for encoding in encodings_to_try:
+        if not encoding or encoding in attempted_encodings:
+            continue
+        attempted_encodings.add(encoding)
+
+        print(f"Trying to decode {path.name} with encoding: '{encoding}'")
+        try:
+            decoded_string = raw_bytes.decode(encoding, errors='replace')
+            data_io = io.StringIO(decoded_string)
+
+            df = pd.read_csv(data_io)
+            # --- ADD THIS LINE ---
+            df.columns = df.columns.str.strip()  # Strip whitespace from all column names
+            # --- END ADDITION ---
+            return df
+        except UnicodeDecodeError as e:
+            print(f"  Failed to decode raw bytes with '{encoding}': {e}. Trying next encoding.")
+            continue
+        except Exception as e:
+            print(
+                f"  An unexpected error occurred while parsing CSV after decoding with '{encoding}': {e}. Trying next encoding.")
+            continue
+
+    raise ValueError(f"Could not decode or parse {path.name} with any of the attempted encodings. "
+                     "Please check the file's actual content for corruption.")
+
 
 def _clean_id(value: str) -> str:
     """
@@ -174,6 +217,7 @@ def _clean_id(value: str) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip().lstrip("'").rstrip("'").upper()
+
 
 def _clean_tel(value: str) -> str:
     """Ensure telephone numbers keep their leading zero if missing."""
@@ -189,37 +233,37 @@ def _clean_tel(value: str) -> str:
         s = "0" + s
     return s
 
+
 def merge_sources(long_df, short_df):
-    long_df["ID_CLEAN"] = long_df["身分證字號"].apply(_clean_id)
+    # Rename '身分證字號' to '身分證號' to prepare for merge
+    if "身分證字號" in long_df.columns:
+        long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
+
+    long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
     short_df["ID_CLEAN"] = short_df["身分證號"].apply(_clean_id)
+
     merged = pd.merge(short_df, long_df, on="ID_CLEAN", how="inner")
-    print("─" * 60)
-    print("long unique IDs:", long_df["ID_CLEAN"].nunique())
-    print("short unique IDs:", short_df["ID_CLEAN"].nunique())
-    common = set(long_df["ID_CLEAN"]) & set(short_df["ID_CLEAN"])
-    print("common IDs:", len(common))
-    print("sample:", list(common)[:5])
-    print("─" * 60)
+
     if merged.empty:
         raise ValueError("No matching IDs …")
-    return merged
 
+    return merged
 
 
 def chunks(lst: List[pd.Series], n: int):
     """Yield successive n‑sized chunks from list."""
     for i in range(0, len(lst), n):
-        yield lst[i : i + n]
+        yield lst[i: i + n]
 
 
 def convert(
-    long_path: Path,
-    short_path: Path,
-    fixed: Dict[str, str],
-    upload_month: str,
-    seq_start: int,
-    out_encoding: str = ENCODING,
-    outdir: Path = Path("output"),
+        long_path: Path,
+        short_path: Path,
+        fixed: Dict[str, str],
+        upload_month: str,
+        seq_start: int,
+        out_encoding: str = ENCODING,
+        outdir: Path = Path("output"),
 ) -> List[Path]:
     """Convert CSVs and write FM.txt file(s)."""
 
@@ -227,29 +271,68 @@ def convert(
     short_df = load_csv(short_path)
     merged = merge_sources(long_df, short_df)
 
-    # Consolidate duplicate columns created by the merge
-    # long.CSV demographics are kept; short.csv columns get dropped.
-    keep_map = {
-        "姓名_x": "姓名",
-        "生日_x": "生日",
-        "住址_x": "住址",
-        "電話_x": "電話",
-        "身分證號": "身分證號",   # already unique
-        "個案類別": "個案類別",   # comes from short.csv
-        "看診日期": "看診日期",   # from long.csv
+    # --- NEW, CORRECTED BLOCK FOR CLEANING UP AFTER MERGE ---
+
+    # After merging, pandas may add suffixes. We need to consolidate these.
+    # We'll prioritize the columns from the "long" file (which gets suffix _y)
+    # for demographics, and keep the original "short" file columns (suffix _x) where applicable.
+
+    # 1. Handle the '身分證號' and '生日' columns specifically
+    # Keep the version from the short file (which has _x suffix) and rename it back.
+    if '身分證號_x' in merged.columns:
+        merged.rename(columns={'身分證號_x': '身分證號'}, inplace=True)
+        # Drop the redundant _y column from the long file
+        if '身分證號_y' in merged.columns:
+            merged.drop(columns=['身分證號_y'], inplace=True)
+
+    if '生日_x' in merged.columns:
+        merged.rename(columns={'生日_x': '生日'}, inplace=True)
+        if '生日_y' in merged.columns:
+            merged.drop(columns=['生日_y'], inplace=True)
+
+    # 2. General cleanup of other suffixed columns (_x is from short, _y is from long)
+    # The original keep_map was slightly incorrect. Let's make it more explicit.
+    # For '姓名', '住址', '電話', we want the version from the long file (_y)
+    # For '看診日期', it also comes from the long file (_y).
+    rename_suffixed = {
+        '姓名_y': '姓名',
+        '住址_y': '住址',
+        '電話_y': '電話',
+        '看診日期_y': '看診日期'  # Assuming '看診日期' might also get a suffix
     }
-    for old, new in keep_map.items():
+    for old, new in rename_suffixed.items():
         if old in merged.columns:
             merged.rename(columns={old: new}, inplace=True)
-    # Drop any other duplicate-suffixed columns to avoid confusion
 
-    merged = merged[[c for c in merged.columns if not c.endswith(("_x", "_y"))]]
-    # Ensure one record per patient
+    # 3. Drop all remaining columns that have suffixes, as they are now redundant.
+    cols_to_drop = [c for c in merged.columns if c.endswith(('_x', '_y'))]
+    merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+    # --- END OF NEW, CORRECTED BLOCK ---
+
+    # Now that we have a clean '身分證號' column, we can drop duplicates.
+    # This line should now work correctly.
     merged.drop_duplicates(subset="身分證號", inplace=True)
 
     # Sort by ID for deterministic output
     merged.sort_values("身分證號", inplace=True)
     records: List[bytes] = []
+
+    # ... (rest of the convert function remains the same)
+
+    # --- Sample data print for debugging ---
+    print("\n--- Sample of Merged and Cleaned Data ---")
+    if not merged.empty:
+        sample_cols = ["姓名", "住址", "身分證號", "生日"]
+        for col in sample_cols:
+            if col in merged.columns:
+                print(f"Column '{col}':")
+                for i in range(min(5, len(merged))):
+                    print(f"  Row {i}: {str(merged.iloc[i][col])[:50]}")
+            else:
+                print(f"Column '{col}' not found in merged data.")
+    print("----------------------------------------------------------\n")
+    # --- End sample data print ---
 
     for _, row in merged.iterrows():
         try:
@@ -274,6 +357,9 @@ def convert(
                 fh.write(rec + b"\r\n")  # CRLF per spec
         written.append(fpath)
         print(f"Wrote {len(chunk):,} rows to {fname}")
+    # --- ADDED DEBUG PRINT FOR FINAL OUTPUT ENCODING ---
+    print(f"Writing output file(s) with encoding: {out_encoding}")
+    # --- END DEBUG ---
 
     return written
 
