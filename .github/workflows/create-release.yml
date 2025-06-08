@@ -22,7 +22,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Caching is not strictly necessary for this small project, but good practice
       - name: Cache dependencies
         uses: actions/cache@v4
         with:
@@ -31,11 +30,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # --- CHANGE: Specify the path to requirements.txt ---
+      # --- CHANGE: Removed the subfolder path ---
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r ai_generated_code/requirements.txt  # Assuming it's in this subfolder
+          pip install -r requirements.txt
           pip install pyinstaller
 
       - name: Set up virtual display for macOS
@@ -44,11 +43,10 @@ jobs:
           /usr/bin/sudo -v
           /usr/bin/sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.WindowServer.plist
 
-      # --- CHANGE: Specify the path to the Python script ---
+      # --- CHANGE: Removed the subfolder paths ---
+      # The --paths argument is now not needed since all .py files are in the same folder.
       - name: Build with PyInstaller
-        # We also need to tell PyInstaller where to find the *other* .py file (fm_converter.py)
-        # The --paths argument does this.
-        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" --paths ai_generated_code ai_generated_code/NHI-GUI.py
+        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" NHI-GUI.py
 
       - name: Compress for macOS
         if: runner.os == 'macOS'
