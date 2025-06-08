@@ -28,27 +28,24 @@ jobs:
         with:
           python-version: '3.12'
 
+      # --- CHANGE: Pinned PyInstaller version ---
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install pyinstaller==6.8.0
           pip install -r requirements.txt
-          pip install pyinstaller
 
-      # --- CHANGE 1: Switched to --onedir for macOS for reliability ---
+      # The --hidden-import=numpy flag is still crucial as a backup instruction.
       - name: Build macOS App with PyInstaller
         if: runner.os == 'macOS'
-        # Using --onedir is more reliable for Tkinter apps on macOS
         run: pyinstaller --onedir --windowed --name "NHI-Converter-macOS-${{ matrix.arch }}" --hidden-import=numpy --target-arch ${{ matrix.arch }} fm_converter_gui.py
 
-      # --- CHANGE 2: Added --hidden-import=numpy for Windows ---
       - name: Build Windows App with PyInstaller
         if: runner.os == 'Windows'
         run: pyinstaller --onefile --windowed --name "NHI-Converter-Windows" --hidden-import=numpy fm_converter_gui.py
 
-      # --- CHANGE 3: Updated macOS compression to zip the entire folder ---
       - name: Compress for macOS
         if: runner.os == 'macOS'
-        # This now zips the entire output folder from --onedir
         run: zip -r NHI-Converter-macOS-${{ matrix.arch }}.zip dist/NHI-Converter-macOS-${{ matrix.arch }}
       
       - name: Compress for Windows
