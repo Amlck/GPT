@@ -31,8 +31,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      # --- THIS IS THE LINE TO CHANGE ---
       - name: Build with PyInstaller
-        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" fm_converter_gui.py
+        # Added --hidden-import=numpy to explicitly include it in the build.
+        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" --hidden-import=numpy fm_converter_gui.py
 
       - name: Compress for macOS
         if: runner.os == 'macOS'
@@ -51,12 +53,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    
-    # --- THIS IS THE NEW BLOCK TO ADD ---
     permissions:
-      contents: write # This grants permission to create a release and upload assets.
-    # --- END NEW BLOCK ---
-    
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
