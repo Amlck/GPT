@@ -17,8 +17,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- NEW DEBUG STEP ---
-      # This will show us exactly what files are in the repository from the workflow's perspective.
+      # This debug step is helpful, we can leave it for now.
       - name: List files in the repository
         run: ls -R
 
@@ -41,12 +40,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # --- REMOVED THE FAILING VIRTUAL DISPLAY STEP ---
-      # We are temporarily removing this to see if the PyInstaller error is related.
-      # It might fail with a different error, which would be useful information.
-
+      # --- THIS IS THE LINE TO CHANGE ---
       - name: Build with PyInstaller
-        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" NHI-GUI.py
+        # Changed NHI-GUI.py to fm_converter_gui.py
+        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" fm_converter_gui.py
 
       - name: Compress for macOS
         if: runner.os == 'macOS'
