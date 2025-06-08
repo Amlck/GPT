@@ -1,0 +1,97 @@
+# Name of your workflow. This will appear in the "Actions" tab on GitHub.
+name: Build and Release Application
+
+# This workflow will only run when you push a new tag that starts with 'v' (e.g., v1.0, v1.0.1)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel.
+jobs:
+  # This job is named 'build'
+  build:
+    # This job will run on both Windows and macOS virtual machines.
+    # The 'matrix' strategy creates a parallel run for each OS.
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    
+    # Specifies the runner (virtual machine) for the job, based on the matrix.
+    runs-on: ${{ matrix.os }}
+
+    # Steps represent a sequence of tasks that will be executed as part of the job.
+    steps:
+      # Step 1: Check out your repository's code so the workflow can access it.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up the Python environment.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12' # Specify the Python version you use
+
+      # Step 3: Cache dependencies for faster builds.
+      # This step stores the installed pip packages and reuses them on subsequent runs.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Step 4: Install your project's dependencies from requirements.txt.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # Step 5: Run PyInstaller to build the executable.
+      # The command is the same, but the output will be .app on macOS and .exe on Windows.
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" NHI-GUI.py
+
+      # Step 6: Compress the output into a ZIP file for easy downloading.
+      # The command is different for macOS and Windows.
+      - name: Compress for macOS
+        if: runner.os == 'macOS'
+        run: zip -r NHI-Converter-macOS.zip dist/NHI-Converter-macOS.app
+      
+      - name: Compress for Windows
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/NHI-Converter-Windows.exe -DestinationPath NHI-Converter-Windows.zip
+
+      # Step 7: Upload the compressed file as an "artifact".
+      # Artifacts are files that are passed between jobs. We'll use this in the next job.
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NHI-Converter-${{ matrix.os }}
+          path: NHI-Converter-*.zip
+
+  # This job runs *after* the 'build' job for both OSs has successfully completed.
+  release:
+    # This job needs the 'build' job to finish first.
+    needs: build
+    # It can run on a simple Ubuntu runner.
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Download all the artifacts (the ZIP files) that were uploaded by the build jobs.
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts # Download them into a folder named 'artifacts'
+      
+      # Step 2: Create a GitHub Release and attach the downloaded ZIP files.
+      # This uses a popular third-party action that simplifies the release process.
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          # This will automatically use the body of your tag message as the release description.
+          # You can also write a description here manually.
+          body_path: '' 
+          # This finds all .zip files in the artifacts directory and attaches them to the release.
+          files: artifacts/*/*.zip
