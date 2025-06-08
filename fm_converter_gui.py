@@ -84,27 +84,69 @@ class ConverterGUI:
 
     def convert(self) -> None:
         try:
+            # --- Start: c. Add Input Validation ---
+            # Create a dictionary of required fields and their string variables for easy checking
+            required_fields = {
+                "Long CSV": self.long_var,
+                "Short CSV": self.short_var,
+                "PLAN_NO": self.plan_var,
+                "BRANCH_CODE": self.branch_var,
+                "HOSP_ID": self.hosp_var,
+                "PRSN_ID": self.prsn_var,
+                "Upload Month (MM)": self.month_var,
+                "Start Sequence (NN)": self.seq_var
+            }
+            for name, var in required_fields.items():
+                if not var.get():
+                    messagebox.showerror("Input Error", f"The field '{name}' cannot be empty.")
+                    return # Stop the conversion process
+
+            # Validate numeric fields
+            upload_month = self.month_var.get()
+            if not upload_month.isdigit() or not (1 <= int(upload_month) <= 12):
+                messagebox.showerror("Input Error", "Upload Month (MM) must be a number between 1 and 12.")
+                return
+
+            seq_start_str = self.seq_var.get()
+            if not seq_start_str.isdigit() or int(seq_start_str) < 1:
+                messagebox.showerror("Input Error", "Start Sequence (NN) must be a number greater than 0.")
+                return
+            # --- End: c. Add Input Validation ---
+
             fixed = {
                 "PLAN_NO": self.plan_var.get().zfill(2),
                 "BRANCH_CODE": self.branch_var.get(),
                 "HOSP_ID": self.hosp_var.get().zfill(10),
                 "PRSN_ID": self.prsn_var.get().zfill(10),
             }
-            fm_converter.convert(
+
+            # --- Change: Capture the return value ---
+            written_files = fm_converter.convert(
                 Path(self.long_var.get()),
                 Path(self.short_var.get()),
                 fixed,
-                self.month_var.get(),
-                int(self.seq_var.get() or 1),
+                self.month_var.get().zfill(2), # Ensure month is two digits
+                int(seq_start_str),
                 out_encoding=fm_converter.BIG5 if self.big5_var.get() else fm_converter.ENCODING,
                 outdir=Path(self.out_var.get()),
             )
-            messagebox.showinfo("Success", "Conversion completed")
+
+            # --- Start: b. Improve the "Success" Message ---
+            if written_files:
+                file_names = "\n".join([path.name for path in written_files])
+                success_message = f"Successfully created {len(written_files)} file(s) in the 'output' folder:\n\n{file_names}"
+                messagebox.showinfo("Success", success_message)
+            else:
+                # This case might occur if the merge results in no valid records
+                messagebox.showwarning("Warning", "Conversion completed, but no output files were generated. This may be due to no matching records between the two CSV files.")
+            # --- End: b. Improve the "Success" Message ---
+
         except Exception as exc:
             print("\n--- ERROR TRACEBACK ---")
             traceback.print_exc()  # This will print the full traceback to your console
             print("------------------------\n")
-            messagebox.showerror("Error", "An unexpected error occurred. Check console for details.")
+            # Show the specific error message from the exception in the popup
+            messagebox.showerror("Error", f"An unexpected error occurred:\n\n{exc}\n\nCheck the console for a detailed traceback.")
 
 
 def main() -> None:
