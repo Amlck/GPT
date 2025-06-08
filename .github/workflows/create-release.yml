@@ -17,7 +17,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # This debug step is helpful, we can leave it for now.
       - name: List files in the repository
         run: ls -R
 
@@ -26,37 +25,32 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # --- THIS IS THE LINE TO CHANGE ---
       - name: Build with PyInstaller
-        # Changed NHI-GUI.py to fm_converter_gui.py
         run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" fm_converter_gui.py
+
+      # --- CHANGES ARE IN THE NEXT TWO STEPS ---
 
       - name: Compress for macOS
         if: runner.os == 'macOS'
-        run: zip -r NHI-Converter-macOS.zip dist/NHI-Converter-macOS.app
+        # Corrected the path to match the PyInstaller output name
+        run: zip -r NHI-Converter-macOS.zip dist/NHI-Converter-${{ matrix.os }}.app
       
       - name: Compress for Windows
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/NHI-Converter-Windows.exe -DestinationPath NHI-Converter-Windows.zip
+        # Corrected the path to match the PyInstaller output name
+        run: Compress-Archive -Path dist/NHI-Converter-${{ matrix.os }}.exe -DestinationPath NHI-Converter-Windows.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: NHI-Converter-${{ matrix.os }}
+          # Corrected the file name to be more generic, will find either .zip file
           path: NHI-Converter-*.zip
 
   release:
@@ -71,5 +65,7 @@ jobs:
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
+          # This tells the release action to use the annotated tag message as the release notes.
+          # You can create an annotated tag like: git tag -a v1.0.8 -m "This is a new release."
           body_path: '' 
           files: artifacts/*/*.zip
