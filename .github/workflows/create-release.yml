@@ -8,17 +8,26 @@ on:
 jobs:
   build:
     strategy:
+      # We now define a matrix with specific details for each build
       matrix:
-        os: [macos-latest, windows-latest]
-    
+        include:
+          # Job 1: Build for Intel Macs
+          - os: macos-13 # This specifies an Intel-based runner
+            arch: x86_64
+            
+          # Job 2: Build for Apple Silicon Macs
+          - os: macos-14 # This specifies an Apple Silicon (ARM) runner
+            arch: arm64
+            
+          # Job 3: Build for Windows
+          - os: windows-latest
+            arch: x86_64 # Use a placeholder arch for Windows
+
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: List files in the repository
-        run: ls -R
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,23 +40,30 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # --- THIS IS THE LINE TO CHANGE ---
-      - name: Build with PyInstaller
-        # Added --hidden-import=numpy to explicitly include it in the build.
-        run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" --hidden-import=numpy fm_converter_gui.py
+      # --- This step is only for macOS builds ---
+      - name: Build macOS App with PyInstaller
+        if: runner.os == 'macOS'
+        # The --target-arch flag tells PyInstaller which CPU to build for
+        run: pyinstaller --onefile --windowed --name "NHI-Converter-macOS-${{ matrix.arch }}" --hidden-import=numpy --target-arch ${{ matrix.arch }} fm_converter_gui.py
+
+      # --- This step is only for Windows builds ---
+      - name: Build Windows App with PyInstaller
+        if: runner.os == 'Windows'
+        run: pyinstaller --onefile --windowed --name "NHI-Converter-Windows" --hidden-import=numpy fm_converter_gui.py
 
       - name: Compress for macOS
         if: runner.os == 'macOS'
-        run: zip -r NHI-Converter-macOS.zip dist/NHI-Converter-${{ matrix.os }}.app
+        run: zip -r NHI-Converter-macOS-${{ matrix.arch }}.zip dist/NHI-Converter-macOS-${{ matrix.arch }}.app
       
       - name: Compress for Windows
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/NHI-Converter-${{ matrix.os }}.exe -DestinationPath NHI-Converter-Windows.zip
+        run: Compress-Archive -Path dist/NHI-Converter-Windows.exe -DestinationPath NHI-Converter-Windows.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NHI-Converter-${{ matrix.os }}
+          # The name is now unique for each build
+          name: NHI-Converter-${{ matrix.os }}-${{ matrix.arch }}
           path: NHI-Converter-*.zip
 
   release:
@@ -64,5 +80,6 @@ jobs:
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          body_path: '' 
+          body_path: ''
+          # This now finds all zips from all build jobs
           files: artifacts/*/*.zip
