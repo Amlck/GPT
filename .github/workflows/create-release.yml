@@ -8,20 +8,14 @@ on:
 jobs:
   build:
     strategy:
-      # We now define a matrix with specific details for each build
       matrix:
         include:
-          # Job 1: Build for Intel Macs
-          - os: macos-13 # This specifies an Intel-based runner
+          - os: macos-13
             arch: x86_64
-            
-          # Job 2: Build for Apple Silicon Macs
-          - os: macos-14 # This specifies an Apple Silicon (ARM) runner
+          - os: macos-14
             arch: arm64
-            
-          # Job 3: Build for Windows
           - os: windows-latest
-            arch: x86_64 # Use a placeholder arch for Windows
+            arch: x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -40,20 +34,22 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # --- This step is only for macOS builds ---
+      # --- CHANGE 1: Switched to --onedir for macOS for reliability ---
       - name: Build macOS App with PyInstaller
         if: runner.os == 'macOS'
-        # The --target-arch flag tells PyInstaller which CPU to build for
-        run: pyinstaller --onefile --windowed --name "NHI-Converter-macOS-${{ matrix.arch }}" --hidden-import=numpy --target-arch ${{ matrix.arch }} fm_converter_gui.py
+        # Using --onedir is more reliable for Tkinter apps on macOS
+        run: pyinstaller --onedir --windowed --name "NHI-Converter-macOS-${{ matrix.arch }}" --hidden-import=numpy --target-arch ${{ matrix.arch }} fm_converter_gui.py
 
-      # --- This step is only for Windows builds ---
+      # --- CHANGE 2: Added --hidden-import=numpy for Windows ---
       - name: Build Windows App with PyInstaller
         if: runner.os == 'Windows'
         run: pyinstaller --onefile --windowed --name "NHI-Converter-Windows" --hidden-import=numpy fm_converter_gui.py
 
+      # --- CHANGE 3: Updated macOS compression to zip the entire folder ---
       - name: Compress for macOS
         if: runner.os == 'macOS'
-        run: zip -r NHI-Converter-macOS-${{ matrix.arch }}.zip dist/NHI-Converter-macOS-${{ matrix.arch }}.app
+        # This now zips the entire output folder from --onedir
+        run: zip -r NHI-Converter-macOS-${{ matrix.arch }}.zip dist/NHI-Converter-macOS-${{ matrix.arch }}
       
       - name: Compress for Windows
         if: runner.os == 'Windows'
@@ -62,7 +58,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          # The name is now unique for each build
           name: NHI-Converter-${{ matrix.os }}-${{ matrix.arch }}
           path: NHI-Converter-*.zip
 
@@ -81,5 +76,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: ''
-          # This now finds all zips from all build jobs
           files: artifacts/*/*.zip
