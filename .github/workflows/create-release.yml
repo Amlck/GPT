@@ -17,6 +17,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # --- NEW DEBUG STEP ---
+      # This will show us exactly what files are in the repository from the workflow's perspective.
+      - name: List files in the repository
+        run: ls -R
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -30,21 +35,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # --- CHANGE: Removed the subfolder path ---
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Set up virtual display for macOS
-        if: runner.os == 'macOS'
-        run: |
-          /usr/bin/sudo -v
-          /usr/bin/sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.WindowServer.plist
+      # --- REMOVED THE FAILING VIRTUAL DISPLAY STEP ---
+      # We are temporarily removing this to see if the PyInstaller error is related.
+      # It might fail with a different error, which would be useful information.
 
-      # --- CHANGE: Removed the subfolder paths ---
-      # The --paths argument is now not needed since all .py files are in the same folder.
       - name: Build with PyInstaller
         run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" NHI-GUI.py
 
