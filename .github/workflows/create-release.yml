@@ -34,28 +34,29 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller --onefile --windowed --name "NHI-Converter-${{ matrix.os }}" fm_converter_gui.py
 
-      # --- CHANGES ARE IN THE NEXT TWO STEPS ---
-
       - name: Compress for macOS
         if: runner.os == 'macOS'
-        # Corrected the path to match the PyInstaller output name
         run: zip -r NHI-Converter-macOS.zip dist/NHI-Converter-${{ matrix.os }}.app
       
       - name: Compress for Windows
         if: runner.os == 'Windows'
-        # Corrected the path to match the PyInstaller output name
         run: Compress-Archive -Path dist/NHI-Converter-${{ matrix.os }}.exe -DestinationPath NHI-Converter-Windows.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: NHI-Converter-${{ matrix.os }}
-          # Corrected the file name to be more generic, will find either .zip file
           path: NHI-Converter-*.zip
 
   release:
     needs: build
     runs-on: ubuntu-latest
+    
+    # --- THIS IS THE NEW BLOCK TO ADD ---
+    permissions:
+      contents: write # This grants permission to create a release and upload assets.
+    # --- END NEW BLOCK ---
+    
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -65,7 +66,5 @@ jobs:
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          # This tells the release action to use the annotated tag message as the release notes.
-          # You can create an annotated tag like: git tag -a v1.0.8 -m "This is a new release."
           body_path: '' 
           files: artifacts/*/*.zip
