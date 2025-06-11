@@ -42,13 +42,13 @@ FIELD_SPECS = [
 ]
 
 CASE_TYPE_MAP = {
-    1: "A",
-    2: "A",
-    3: "A",
-    4: "A",
-    5: "A",
-    7: "A",
-    6: "C",
+    1: "C",
+    2: "C",
+    3: "C",
+    4: "C",
+    5: "C",
+    7: "C",
+    6: "A",
 }
 
 
@@ -267,10 +267,13 @@ def convert(
     rename_suffixed = {
         '姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話',
         '看診日期_y': '看診日期', '身分證號_x': '身分證號', '生日_x': '生日',
+        '個案類別_x': '個案類別',  # <--- ADD THIS LINE
     }
     for old, new in rename_suffixed.items():
         if old in merged.columns:
             merged.rename(columns={old: new}, inplace=True)
+
+    # Now this line will not delete the renamed '個案類別' column
     cols_to_drop = [c for c in merged.columns if c.endswith(('_x', '_y'))]
     merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
