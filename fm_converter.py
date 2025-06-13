@@ -16,42 +16,26 @@ import pandas as pd
 ###############################################################################
 # Utility helpers                                                             #
 ###############################################################################
-
+# ... (RECORD_LEN, ENCODING, BIG5, FIELD_SPECS, CASE_TYPE_MAP, etc. remain the same) ...
+# ...
 RECORD_LEN = 208
 ENCODING = "utf-8"
 BIG5 = "cp950"
 
-# ... (FIELD_SPECS, CASE_TYPE_MAP, detect_encoding, roc_to_gregorian, pad, _fw remain the same) ...
-# ...
 FIELD_SPECS = [
-    ("SEGMENT", 1),
-    ("PLAN_NO", 2),
-    ("BRANCH_CODE", 1),
-    ("HOSP_ID", 10),
-    ("ID", 10),
-    ("BIRTHDAY", 8),
-    ("NAME", 12),
-    ("SEX", 1),
-    ("INFORM_ADDR", 120),
-    ("TEL", 15),
-    ("PRSN_ID", 10),
-    ("CASE_TYPE", 1),
-    ("CASE_DATE", 8),
-    ("CLOSE_DATE", 8),
-    ("CLOSE_RSN", 1),
+    ("SEGMENT", 1), ("PLAN_NO", 2), ("BRANCH_CODE", 1), ("HOSP_ID", 10),
+    ("ID", 10), ("BIRTHDAY", 8), ("NAME", 12), ("SEX", 1), ("INFORM_ADDR", 120),
+    ("TEL", 15), ("PRSN_ID", 10), ("CASE_TYPE", 1), ("CASE_DATE", 8),
+    ("CLOSE_DATE", 8), ("CLOSE_RSN", 1),
 ]
 
 CASE_TYPE_MAP = {
-    1: "A",
-    2: "A",
-    3: "A",
-    4: "A",
-    5: "A",
-    7: "A",
-    6: "C",
+    1: "A", 2: "A", 3: "A", 4: "A", 5: "A", 7: "A", 6: "C",
 }
 
 
+# ... (detect_encoding, roc_to_gregorian, pad, _fw remain the same) ...
+# ...
 def detect_encoding(path: Path) -> str:
     """Detect file encoding using chardet (fallback utf‑8)."""
     with path.open("rb") as fh:
@@ -84,7 +68,27 @@ def _fw(value: str, width: int, align: str = "l", enc: str = ENCODING) -> bytes:
     return raw + pad_bytes if align == "l" else pad_bytes + raw
 
 
-# --- MODIFIED: build_record signature and logic ---
+# --- ADDED: Helper function to map gender codes ---
+def _map_sex(id_number: str) -> str:
+    """Maps the second digit of a Taiwanese ID to the required sex code.
+    1, 8 -> 1 (Male)
+    2, 9 -> 2 (Female)
+    """
+    if not isinstance(id_number, str) or len(id_number) < 2:
+        return ""
+
+    gender_digit = id_number[1]
+    if gender_digit in ('1', '8'):
+        return '1'
+    if gender_digit in ('2', '9'):
+        return '2'
+
+    # Log a warning for unexpected gender digits, but don't crash
+    logging.warning(f"Unexpected gender digit '{gender_digit}' in ID {id_number}. Leaving SEX field blank.")
+    return ""
+
+
+# --- MODIFIED: build_record logic ---
 def build_record(
         row: pd.Series,
         fixed: Dict[str, str],
@@ -103,21 +107,21 @@ def build_record(
     case_num = int(_raw_case) if _raw_case.isdigit() else 0
 
     formatted_start_date = start_date.replace("/", "").replace("-", "")
-
-    # Use end_date only if it's a closed case, otherwise it's blank
     formatted_end_date = end_date.replace("/", "").replace("-", "") if segment_type == "B" else ""
-    # Use close_reason only if it's a closed case
     final_close_reason = close_reason if segment_type == "B" else ""
+
+    id_number = row.get("身分證號", "")
 
     values: Dict[str, str] = {
         "SEGMENT": segment_type,
         "PLAN_NO": fixed["PLAN_NO"],
         "BRANCH_CODE": fixed["BRANCH_CODE"],
         "HOSP_ID": fixed["HOSP_ID"],
-        "ID": row.get("身分證號", ""),
+        "ID": id_number,
         "BIRTHDAY": roc_to_gregorian(birthday_roc),
         "NAME": row.get("姓名", ""),
-        "SEX": str(row.get("身分證號", ""))[1] if row.get("身分證號", "") else "",
+        # --- MODIFIED: Use the new helper function for SEX mapping ---
+        "SEX": _map_sex(id_number),
         "INFORM_ADDR": row.get("住址", ""),
         "TEL": _clean_tel(row.get("電話", "")),
         "PRSN_ID": fixed["PRSN_ID"],
@@ -128,6 +132,7 @@ def build_record(
     }
 
     # Build fixed‑width line
+    # ... (record building logic remains the same) ...
     record = b"".join([
         _fw(values["SEGMENT"], 1, enc=encoding),
         _fw(values["PLAN_NO"], 2, "r", enc=encoding),
@@ -152,38 +157,27 @@ def build_record(
 ###############################################################################
 # Main converter logic                                                        #
 ###############################################################################
-
-# ... (load_csv, _clean_id, _clean_tel, merge_sources, chunks functions remain the same) ...
+# ... (load_csv, _clean_id, _clean_tel, merge_sources, chunks, convert, main functions remain the same) ...
 # ...
 def load_csv(path: Path) -> pd.DataFrame:
     """Read CSV file, attempting to decode with fallbacks and error handling."""
     encodings_to_try = [
-        "utf-8-sig",
-        "utf-8",
-        "cp950",
-        "big5",
-        detect_encoding(path),
-        "gbk",
-        "latin-1",
+        "utf-8-sig", "utf-8", "cp950", "big5", detect_encoding(path), "gbk", "latin-1",
     ]
-
     try:
         with path.open("rb") as f_raw:
             raw_bytes = f_raw.read()
     except Exception as e:
         raise ValueError(f"Error reading raw bytes from {path.name}: {e}")
-
     attempted_encodings = set()
     for encoding in encodings_to_try:
         if not encoding or encoding in attempted_encodings:
             continue
         attempted_encodings.add(encoding)
-
         print(f"Trying to decode {path.name} with encoding: '{encoding}'")
         try:
             decoded_string = raw_bytes.decode(encoding, errors='replace')
             data_io = io.StringIO(decoded_string)
-
             df = pd.read_csv(data_io)
             df.columns = df.columns.str.strip()
             return df
@@ -194,15 +188,12 @@ def load_csv(path: Path) -> pd.DataFrame:
             print(
                 f"  An unexpected error occurred while parsing CSV after decoding with '{encoding}': {e}. Trying next encoding.")
             continue
-
-    raise ValueError(f"Could not decode or parse {path.name} with any of the attempted encodings. "
-                     "Please check the file's actual content for corruption.")
+    raise ValueError(
+        f"Could not decode or parse {path.name} with any of the attempted encodings. Please check the file's actual content for corruption.")
 
 
 def _clean_id(value: str) -> str:
-    """
-    Strip whitespace & leading / trailing apostrophes, make uppercase.
-    """
+    """Strip whitespace & leading / trailing apostrophes, make uppercase."""
     if not isinstance(value, str):
         return ""
     return value.strip().lstrip("'").rstrip("'").upper()
@@ -225,15 +216,11 @@ def _clean_tel(value: str) -> str:
 def merge_sources(long_df, short_df):
     if "身分證字號" in long_df.columns:
         long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
-
     long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
     short_df["ID_CLEAN"] = short_df["身分證號"].apply(_clean_id)
-
     merged = pd.merge(short_df, long_df, on="ID_CLEAN", how="inner")
-
     if merged.empty:
         raise ValueError("No matching IDs …")
-
     return merged
 
 
@@ -243,60 +230,41 @@ def chunks(lst: List[pd.Series], n: int):
         yield lst[i: i + n]
 
 
-# --- MODIFIED: convert function signature ---
 def convert(
-        long_path: Path,
-        short_path: Path,
-        fixed: Dict[str, str],
-        upload_month: str,
-        start_date: str,
-        end_date: str,
-        segment_type: str,
-        close_reason: str,
-        seq_start: int,
-        out_encoding: str = ENCODING,
-        outdir: Path = Path("output"),
+        long_path: Path, short_path: Path, fixed: Dict[str, str], upload_month: str,
+        start_date: str, end_date: str, segment_type: str, close_reason: str,
+        seq_start: int, out_encoding: str = ENCODING, outdir: Path = Path("output"),
 ) -> List[Path]:
     """Convert CSVs and write FM.txt file(s)."""
-
     long_df = load_csv(long_path)
     short_df = load_csv(short_path)
     merged = merge_sources(long_df, short_df)
-
     # Cleanup merged columns
     rename_suffixed = {
         '姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話',
         '看診日期_y': '看診日期', '身分證號_x': '身分證號', '生日_x': '生日',
-        '個案類別_x': '個案類別',  # <--- ADD THIS LINE
+        '個案類別_x': '個案類別',
     }
     for old, new in rename_suffixed.items():
         if old in merged.columns:
             merged.rename(columns={old: new}, inplace=True)
-
-    # Now this line will not delete the renamed '個案類別' column
     cols_to_drop = [c for c in merged.columns if c.endswith(('_x', '_y'))]
     merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-
     merged.drop_duplicates(subset="身分證號", inplace=True)
     merged.sort_values("身分證號", inplace=True)
     records: List[bytes] = []
-
     for _, row in merged.iterrows():
         try:
-            # --- MODIFIED: Pass all new parameters to build_record ---
             rec = build_record(
                 row, fixed, start_date, end_date, segment_type, close_reason, out_encoding
             )
             records.append(rec)
         except Exception as e:
             logging.warning(f"Skipping {row.get('身分證號')}: {e}")
-
     if not records:
         logging.error("No valid rows – nothing to write!")
         raise ValueError("No valid rows to write")
-
     outdir.mkdir(parents=True, exist_ok=True)
-
     written: List[Path] = []
     CHUNK_SIZE = 9999
     for idx, chunk in enumerate(chunks(records, CHUNK_SIZE), start=seq_start):
@@ -308,27 +276,20 @@ def convert(
         written.append(fpath)
         print(f"Wrote {len(chunk):,} rows to {fname}")
     print(f"Writing output file(s) with encoding: {out_encoding}")
-
     return written
 
 
-# --- MODIFIED: main function for CLI to handle new logic ---
 def main(argv: List[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Convert Family Physician CSVs to FM.txt upload format")
     p.add_argument("--long", required=True, type=Path, help="Path to long.CSV (demographics)")
     p.add_argument("--short", required=True, type=Path, help="Path to short.csv (case meta)")
     p.add_argument("--big5", action="store_true", help="Write output in Big-5 instead of UTF-8")
     p.add_argument("--outdir", type=Path, default=Path("output"), help="Destination directory")
-
     args = p.parse_args(argv)
     out_encoding = BIG5 if args.big5 else ENCODING
-
     logging.basicConfig(
-        filename="fm_converter.log",
-        level=logging.INFO,
-        format="%(levelname)s:%(message)s",
+        filename="fm_converter.log", level=logging.INFO, format="%(levelname)s:%(message)s",
     )
-
     # === Operator prompts ====================================================
     fixed: Dict[str, str] = {}
     fixed["PLAN_NO"] = input("Enter PLAN_NO (e.g. 09): ").zfill(2)
@@ -337,31 +298,20 @@ def main(argv: List[str] | None = None) -> None:
     fixed["PRSN_ID"] = input("Enter PRSN_ID (10 digits physician ID): ").zfill(10)
     upload_month = input("Enter upload month MM (01‑12): ")
     seq_start = int(input("Start sequence NN (01‑99) [default 1]: ") or 1)
-
-    # CLI-specific logic for use case
     segment_type = ""
     while segment_type.upper() not in ["A", "B"]:
         segment_type = input("Enter Use Case (A: New/Open, B: Closed): ").upper()
-
     start_date = input("Enter Case Start Date (YYYYMMDD): ")
     end_date = ""
     close_reason = ""
     if segment_type == "B":
         end_date = input("Enter Case End Date (YYYYMMDD): ")
         close_reason = input("Enter Close Reason (1-3): ")
-
     convert(
-        long_path=args.long,
-        short_path=args.short,
-        fixed=fixed,
-        upload_month=upload_month,
-        start_date=start_date,
-        end_date=end_date,
-        segment_type=segment_type,
-        close_reason=close_reason,
-        seq_start=seq_start,
-        out_encoding=out_encoding,
-        outdir=args.outdir,
+        long_path=args.long, short_path=args.short, fixed=fixed,
+        upload_month=upload_month, start_date=start_date, end_date=end_date,
+        segment_type=segment_type, close_reason=close_reason, seq_start=seq_start,
+        out_encoding=out_encoding, outdir=args.outdir,
     )
 
 
