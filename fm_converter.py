@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List
 import io
 
-import chardet  # type: ignore
+import chardet # type: ignore
 import pandas as pd
 
 ###############################################################################
@@ -214,13 +214,15 @@ def _clean_tel(value: str) -> str:
 
 
 def merge_sources(long_df, short_df):
-    if "身分證字號" in long_df.columns:
-        long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
+    # This renaming is now done in the main convert function before this is called.
     long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
     short_df["ID_CLEAN"] = short_df["身分證號"].apply(_clean_id)
+
     merged = pd.merge(short_df, long_df, on="ID_CLEAN", how="inner")
+
     if merged.empty:
         raise ValueError("No matching IDs …")
+
     return merged
 
 
@@ -231,29 +233,91 @@ def chunks(lst: List[pd.Series], n: int):
 
 
 def convert(
-        long_path: Path, short_path: Path, fixed: Dict[str, str], upload_month: str,
-        start_date: str, end_date: str, segment_type: str, close_reason: str,
-        seq_start: int, out_encoding: str = ENCODING, outdir: Path = Path("output"),
+        long_path: Path,
+        short_path: Path,
+        fixed: Dict[str, str],
+        upload_month: str,
+        start_date: str,
+        end_date: str,
+        segment_type: str,
+        close_reason: str,
+        seq_start: int,
+        out_encoding: str = ENCODING,
+        outdir: Path = Path("output"),
+        mode: str = "matched",
 ) -> List[Path]:
-    """Convert CSVs and write FM.txt file(s)."""
+    """
+    Convert CSVs and write FM.txt file(s).
+    """
     long_df = load_csv(long_path)
     short_df = load_csv(short_path)
-    merged = merge_sources(long_df, short_df)
-    # Cleanup merged columns
-    rename_suffixed = {
-        '姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話',
-        '看診日期_y': '看診日期', '身分證號_x': '身分證號', '生日_x': '生日',
-        '個案類別_x': '個案類別',
-    }
-    for old, new in rename_suffixed.items():
-        if old in merged.columns:
-            merged.rename(columns={old: new}, inplace=True)
-    cols_to_drop = [c for c in merged.columns if c.endswith(('_x', '_y'))]
-    merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-    merged.drop_duplicates(subset="身分證號", inplace=True)
-    merged.sort_values("身分證號", inplace=True)
+
+    # --- ADDED: Standardize column names for both dataframes right after loading ---
+    # This ensures that both modes can reliably find the '身分證號' column.
+    if "身分證字號" in long_df.columns:
+        long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
+    if "身分證字號" in short_df.columns:
+        short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
+
+    # Now, proceed with the mode-specific logic
+    if mode == "unmatched":
+        # --- THIS LOGIC WILL NOW WORK CORRECTLY ---
+        long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
+        short_ids = set(short_df["身分證號"].apply(_clean_id))
+
+        unmatched_visits_df = long_df[~long_df["ID_CLEAN"].isin(short_ids)].copy()
+
+        if unmatched_visits_df.empty:
+            logging.warning("No unmatched patients found between long and short files.")
+            return []
+
+        print(f"Found {len(unmatched_visits_df)} total visits for unmatched patients. Aggregating by patient...")
+
+        demographic_cols = ['身分證號', '姓名', '生日', '住址', '電話']
+        for col in demographic_cols:
+            if col not in unmatched_visits_df.columns:
+                raise ValueError(f"Required column '{col}' for aggregation not found in the long CSV file.")
+
+        aggregated_df = unmatched_visits_df.groupby('ID_CLEAN').agg(
+            visit_count=('ID_CLEAN', 'size'),
+            **{col: (col, 'first') for col in demographic_cols}
+        ).reset_index()
+
+        aggregated_df['生日'] = aggregated_df['生日'].astype(str)
+
+        sorted_df = aggregated_df.sort_values(
+            by=['visit_count', '生日'],
+            ascending=[False, False]
+        )
+
+        selected_df = sorted_df.head(200)
+        print(
+            f"Aggregated down to {len(aggregated_df)} unique unmatched patients. Selected top {len(selected_df)} based on criteria.")
+
+        df_to_process = selected_df
+
+    else:  # mode == "matched"
+        # This will also continue to work correctly
+        merged = merge_sources(long_df, short_df)
+
+        rename_suffixed = {
+            '姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話',
+            '看診日期_y': '看診日期', '身分證號_x': '身分證號', '生日_x': '生日',
+            '個案類別_x': '個案類別',
+        }
+        for old, new in rename_suffixed.items():
+            if old in merged.columns:
+                merged.rename(columns={old: new}, inplace=True)
+        cols_to_drop = [c for c in merged.columns if c.endswith(('_x', '_y'))]
+        merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+        merged.drop_duplicates(subset="身分證號", inplace=True)
+        merged.sort_values("身分證號", inplace=True)
+        df_to_process = merged
+
+    # --- COMMON LOGIC (Unchanged) ---
     records: List[bytes] = []
-    for _, row in merged.iterrows():
+    for _, row in df_to_process.iterrows():
         try:
             rec = build_record(
                 row, fixed, start_date, end_date, segment_type, close_reason, out_encoding
@@ -261,21 +325,27 @@ def convert(
             records.append(rec)
         except Exception as e:
             logging.warning(f"Skipping {row.get('身分證號')}: {e}")
+
     if not records:
-        logging.error("No valid rows – nothing to write!")
-        raise ValueError("No valid rows to write")
+        logging.error("No valid rows to process – nothing to write!")
+        return []
+
     outdir.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
-    CHUNK_SIZE = 9999
+
+    file_suffix = "FM_B.txt" if mode == "unmatched" else "FM.txt"
+    CHUNK_SIZE = 9999 if mode == "matched" else 200
+
     for idx, chunk in enumerate(chunks(records, CHUNK_SIZE), start=seq_start):
-        fname = f"{fixed['BRANCH_CODE']}{fixed['HOSP_ID']}{upload_month}{idx:02d}FM.txt"
+        fname = f"{fixed['BRANCH_CODE']}{fixed['HOSP_ID']}{upload_month}{idx:02d}{file_suffix}"
         fpath = outdir / fname
         with fpath.open("wb") as fh:
             for rec in chunk:
-                fh.write(rec + b"\r\n")  # CRLF per spec
+                fh.write(rec + b"\r\n")
         written.append(fpath)
         print(f"Wrote {len(chunk):,} rows to {fname}")
     print(f"Writing output file(s) with encoding: {out_encoding}")
+
     return written
 
 
@@ -313,6 +383,7 @@ def main(argv: List[str] | None = None) -> None:
         segment_type=segment_type, close_reason=close_reason, seq_start=seq_start,
         out_encoding=out_encoding, outdir=args.outdir,
     )
+    print("This script is intended to be run via its GUI. Please run fm_converter_gui.py")
 
 
 if __name__ == "__main__":
