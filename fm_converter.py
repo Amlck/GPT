@@ -214,15 +214,11 @@ def _clean_tel(value: str) -> str:
 
 
 def merge_sources(long_df, short_df):
-    # This renaming is now done in the main convert function before this is called.
     long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
     short_df["ID_CLEAN"] = short_df["身分證號"].apply(_clean_id)
-
     merged = pd.merge(short_df, long_df, on="ID_CLEAN", how="inner")
-
     if merged.empty:
         raise ValueError("No matching IDs …")
-
     return merged
 
 
@@ -252,27 +248,40 @@ def convert(
     long_df = load_csv(long_path)
     short_df = load_csv(short_path)
 
-    # --- ADDED: Standardize column names for both dataframes right after loading ---
-    # This ensures that both modes can reliably find the '身分證號' column.
+    # Standardize column names for both dataframes right after loading
     if "身分證字號" in long_df.columns:
         long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
     if "身分證字號" in short_df.columns:
         short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
 
-    # Now, proceed with the mode-specific logic
     if mode == "unmatched":
-        # --- THIS LOGIC WILL NOW WORK CORRECTLY ---
-        long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
-        short_ids = set(short_df["身分證號"].apply(_clean_id))
+        # --- REWRITTEN & MORE ROBUST LOGIC FOR "UNMATCHED" MODE ---
 
+        # 1. Check if the required ID column exists after potential rename
+        if "身分證號" not in long_df.columns or "身分證號" not in short_df.columns:
+            raise KeyError("The required ID column '身分證號' or '身分證字號' was not found in one of the CSV files.")
+
+        # 2. Force ID columns to string type and handle missing values
+        for df in [long_df, short_df]:
+            df['身分證號'] = df['身分證號'].astype(str).str.strip()
+            df.dropna(subset=['身分證號'], inplace=True)
+            df.drop(df[df['身分證號'] == ''].index, inplace=True)
+
+        # 3. Create a clean, reliable set of IDs from the short list
+        short_ids = set(short_df["身分證號"].apply(_clean_id))
+        short_ids.discard("")  # Remove any blank entries just in case
+
+        # 4. Create clean IDs on the long list and filter
+        long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
         unmatched_visits_df = long_df[~long_df["ID_CLEAN"].isin(short_ids)].copy()
 
         if unmatched_visits_df.empty:
-            logging.warning("No unmatched patients found between long and short files.")
+            logging.warning(
+                "No unmatched patients found after filtering. Check if all patients in the 'long' list are already in the 'short' list.")
             return []
 
+        # ... (Aggregation and sorting logic remains the same)
         print(f"Found {len(unmatched_visits_df)} total visits for unmatched patients. Aggregating by patient...")
-
         demographic_cols = ['身分證號', '姓名', '生日', '住址', '電話']
         for col in demographic_cols:
             if col not in unmatched_visits_df.columns:
@@ -282,24 +291,17 @@ def convert(
             visit_count=('ID_CLEAN', 'size'),
             **{col: (col, 'first') for col in demographic_cols}
         ).reset_index()
-
         aggregated_df['生日'] = aggregated_df['生日'].astype(str)
-
         sorted_df = aggregated_df.sort_values(
-            by=['visit_count', '生日'],
-            ascending=[False, False]
+            by=['visit_count', '生日'], ascending=[False, False]
         )
-
         selected_df = sorted_df.head(200)
         print(
             f"Aggregated down to {len(aggregated_df)} unique unmatched patients. Selected top {len(selected_df)} based on criteria.")
-
         df_to_process = selected_df
 
     else:  # mode == "matched"
-        # This will also continue to work correctly
         merged = merge_sources(long_df, short_df)
-
         rename_suffixed = {
             '姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話',
             '看診日期_y': '看診日期', '身分證號_x': '身分證號', '生日_x': '生日',
@@ -310,7 +312,6 @@ def convert(
                 merged.rename(columns={old: new}, inplace=True)
         cols_to_drop = [c for c in merged.columns if c.endswith(('_x', '_y'))]
         merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-
         merged.drop_duplicates(subset="身分證號", inplace=True)
         merged.sort_values("身分證號", inplace=True)
         df_to_process = merged
@@ -319,9 +320,7 @@ def convert(
     records: List[bytes] = []
     for _, row in df_to_process.iterrows():
         try:
-            rec = build_record(
-                row, fixed, start_date, end_date, segment_type, close_reason, out_encoding
-            )
+            rec = build_record(row, fixed, start_date, end_date, segment_type, close_reason, out_encoding)
             records.append(rec)
         except Exception as e:
             logging.warning(f"Skipping {row.get('身分證號')}: {e}")
@@ -332,10 +331,8 @@ def convert(
 
     outdir.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
-
     file_suffix = "FM_B.txt" if mode == "unmatched" else "FM.txt"
     CHUNK_SIZE = 9999 if mode == "matched" else 200
-
     for idx, chunk in enumerate(chunks(records, CHUNK_SIZE), start=seq_start):
         fname = f"{fixed['BRANCH_CODE']}{fixed['HOSP_ID']}{upload_month}{idx:02d}{file_suffix}"
         fpath = outdir / fname
@@ -345,7 +342,6 @@ def convert(
         written.append(fpath)
         print(f"Wrote {len(chunk):,} rows to {fname}")
     print(f"Writing output file(s) with encoding: {out_encoding}")
-
     return written
 
 
