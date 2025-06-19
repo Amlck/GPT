@@ -248,56 +248,64 @@ def convert(
     long_df = load_csv(long_path)
     short_df = load_csv(short_path)
 
-    # Standardize column names for both dataframes right after loading
     if "身分證字號" in long_df.columns:
         long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
     if "身分證字號" in short_df.columns:
         short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
 
     if mode == "unmatched":
-        # --- REWRITTEN & MORE ROBUST LOGIC FOR "UNMATCHED" MODE ---
+        # --- REWRITTEN & HARDENED LOGIC FOR "UNMATCHED" MODE ---
+        # 1. Check for required columns before proceeding
+        required_cols = ['身分證號', '姓名', '生日', '住址', '電話']
+        for col in required_cols:
+            if col not in long_df.columns:
+                raise ValueError(f"Required column '{col}' not found in the '整年度看診名單' file.")
+        if "身分證號" not in short_df.columns:
+            raise ValueError("Required column '身分證號' not found in the '健保署下載名單' file.")
 
-        # 1. Check if the required ID column exists after potential rename
-        if "身分證號" not in long_df.columns or "身分證號" not in short_df.columns:
-            raise KeyError("The required ID column '身分證號' or '身分證字號' was not found in one of the CSV files.")
-
-        # 2. Force ID columns to string type and handle missing values
+        # 2. Sanitize dataframes: force string types and drop rows with null critical info
         for df in [long_df, short_df]:
             df['身分證號'] = df['身分證號'].astype(str).str.strip()
             df.dropna(subset=['身分證號'], inplace=True)
-            df.drop(df[df['身分證號'] == ''].index, inplace=True)
+
+        long_df.dropna(subset=['電話', '姓名', '生日'], inplace=True)
+        long_df = long_df[long_df['電話'].astype(str).str.strip() != '']
 
         # 3. Create a clean, reliable set of IDs from the short list
         short_ids = set(short_df["身分證號"].apply(_clean_id))
-        short_ids.discard("")  # Remove any blank entries just in case
+        short_ids.discard("")
 
-        # 4. Create clean IDs on the long list and filter
-        long_df["ID_CLEAN"] = long_df["身分證號"].apply(_clean_id)
-        unmatched_visits_df = long_df[~long_df["ID_CLEAN"].isin(short_ids)].copy()
+        # 4. PRE-COMPUTATION FILTERING: Filter the long list to find ELIGIBLE candidates
+        print("Filtering for eligible, unmatched patients...")
 
-        if unmatched_visits_df.empty:
-            logging.warning(
-                "No unmatched patients found after filtering. Check if all patients in the 'long' list are already in the 'short' list.")
+        # Filter 1: Must NOT be in the short list
+        eligible_df = long_df[~long_df["身分證號"].apply(_clean_id).isin(short_ids)].copy()
+
+        # Filter 2: Must have a valid ID that can produce a Sex code
+        eligible_df['sex_check'] = eligible_df['身分證號'].apply(_map_sex)
+        eligible_df = eligible_df[eligible_df['sex_check'] != '']
+        eligible_df.drop(columns=['sex_check'], inplace=True)
+
+        if eligible_df.empty:
+            logging.warning("No eligible unmatched patients found after applying all filters.")
             return []
 
-        # ... (Aggregation and sorting logic remains the same)
-        print(f"Found {len(unmatched_visits_df)} total visits for unmatched patients. Aggregating by patient...")
-        demographic_cols = ['身分證號', '姓名', '生日', '住址', '電話']
-        for col in demographic_cols:
-            if col not in unmatched_visits_df.columns:
-                raise ValueError(f"Required column '{col}' for aggregation not found in the long CSV file.")
+        # 5. AGGREGATION: Now, aggregate the fully cleaned data
+        print(f"Found {len(eligible_df)} total visits for eligible patients. Aggregating...")
 
-        aggregated_df = unmatched_visits_df.groupby('ID_CLEAN').agg(
-            visit_count=('ID_CLEAN', 'size'),
-            **{col: (col, 'first') for col in demographic_cols}
+        aggregated_df = eligible_df.groupby("身分證號").agg(
+            visit_count=('身分證號', 'size'),
+            **{col: (col, 'first') for col in ['姓名', '生日', '住址', '電話']}
         ).reset_index()
+
+        # 6. SORT & SELECT: Sort by criteria and select the top 200
         aggregated_df['生日'] = aggregated_df['生日'].astype(str)
         sorted_df = aggregated_df.sort_values(
             by=['visit_count', '生日'], ascending=[False, False]
         )
         selected_df = sorted_df.head(200)
         print(
-            f"Aggregated down to {len(aggregated_df)} unique unmatched patients. Selected top {len(selected_df)} based on criteria.")
+            f"Aggregated down to {len(aggregated_df)} unique eligible patients. Selected top {len(selected_df)} based on criteria.")
         df_to_process = selected_df
 
     else:  # mode == "matched"
