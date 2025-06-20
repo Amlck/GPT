@@ -79,15 +79,25 @@ def chunks(lst: List, n: int):
 
 
 def load_csv(path: Path) -> pd.DataFrame:
-    for enc in ["utf-8-sig", "utf-8", "cp950", detect_encoding(path)]:
+    """
+    Robustly loads a CSV, trying multiple encodings, cleaning column
+    headers, and preventing pandas from incorrectly auto-indexing.
+    """
+    encodings_to_try = ["utf-8-sig", "utf-8", "cp950", detect_encoding(path)]
+    for encoding in encodings_to_try:
         try:
-            with path.open("r", encoding=enc, errors="replace") as f:
-                df = pd.read_csv(f, dtype=str)
-                df.columns = df.columns.str.strip()
-                return df
+            # --- THIS IS THE FIX ---
+            # index_col=False forces pandas to treat all columns as data,
+            # preventing it from mistakenly using the first column as row labels.
+            df = pd.read_csv(path, encoding=encoding, dtype=str, index_col=False)
+
+            # Clean column headers of whitespace and BOM
+            df.columns = [col.strip().lstrip('\ufeff') for col in df.columns]
+            return df
         except Exception:
             continue
-    raise ValueError(f"Could not decode or parse {path.name}.")
+
+    raise ValueError(f"Could not decode or parse {path.name} with any attempted encoding.")
 
 
 def merge_sources(long_df, short_df):
@@ -124,9 +134,12 @@ def _get_ids_from_fixed_width(path: Path, enc: str) -> List[str]:
             len(line) >= id_start + id_len]
 
 
-def convert(long_path: Path, short_path: Path, fixed: Dict, upload_month: str, start_date: str, end_date: str,
-            segment_type: str, close_reason: str, seq_start: int, out_encoding: str, outdir: Path, mode: str,
-            rejection_path: Path | None, submitted_path: Path | None) -> List[Path]:
+def convert(
+        long_path: Path, short_path: Path, fixed: Dict, upload_month: str,
+        start_date: str, end_date: str, segment_type: str, close_reason: str,
+        seq_start: int, out_encoding: str, outdir: Path, mode: str,
+        rejection_path: Path | None, submitted_path: Path | None
+) -> List[Path]:
     long_df, short_df = load_csv(long_path), load_csv(short_path)
     if "身分證字號" in long_df.columns: long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
     if "身分證字號" in short_df.columns: short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
@@ -134,18 +147,45 @@ def convert(long_path: Path, short_path: Path, fixed: Dict, upload_month: str, s
     if mode in ["unmatched", "refine"]:
         eligible_df = _get_eligible_candidates(long_df, short_df)
         if eligible_df.empty: return []
-        agg_df = eligible_df.groupby("身分證號").agg(visit_count=('身分證號', 'size'), **{c: (c, 'first') for c in
-                                                                                          ['姓名', '生日', '住址',
-                                                                                           '電話']}).reset_index()
+        agg_df = eligible_df.groupby("身分證號").agg(
+            visit_count=('身分證號', 'size'), **{c: (c, 'first') for c in ['姓名', '生日', '住址', '電話']}
+        ).reset_index()
         master_candidate_pool = agg_df.sort_values(by=['visit_count', '生日'], ascending=[False, False])
 
         if mode == "refine":
             if not rejection_path or not submitted_path: raise ValueError("Submitted and rejection files are required.")
+
             submitted_ids = _get_ids_from_fixed_width(submitted_path, out_encoding)
             rejection_df = load_csv(rejection_path)
-            if '上傳序號' not in rejection_df.columns: raise ValueError("Rejection file must have '上傳序號' column.")
 
-            rejected_rows = pd.to_numeric(rejection_df['上傳序號'], errors='coerce').dropna().astype(int).tolist()
+            # --- START: NEW DIAGNOSTIC AND ROBUST CLEANING BLOCK ---
+
+            print("\n--- REJECTION FILE DIAGNOSTICS ---")
+            print("Columns found in rejection file:", rejection_df.columns.tolist())
+
+            if '上傳序號' not in rejection_df.columns:
+                raise ValueError("Rejection file must have '上傳序號' column. Check spelling/hidden characters.")
+
+            print("First 5 raw values of '上傳序號' column:")
+            print(rejection_df['上傳序號'].head().to_string())
+            print("----------------------------------\n")
+
+            # More robust cleaning: extracts both standard and full-width numbers.
+            cleaned_rows_text = rejection_df['上傳序號'].str.extract(r'([0-9０-９]+)', expand=False)
+
+            print("\n--- CLEANING DIAGNOSTICS ---")
+            print("Result of extracting digits (first 5 values):")
+            print(cleaned_rows_text.head().to_string())
+            print("----------------------------\n")
+
+            rejected_rows = pd.to_numeric(cleaned_rows_text, errors='coerce').dropna().astype(int).tolist()
+
+            # --- END: NEW DIAGNOSTIC BLOCK ---
+
+            if not rejected_rows:
+                logging.warning("Could not find any valid row numbers in the rejection file. No changes will be made.")
+                return []
+
             rejected_ids_clean = {_clean_id(submitted_ids[row - 1]) for row in rejected_rows if
                                   0 < row <= len(submitted_ids)}
 
@@ -177,10 +217,10 @@ def convert(long_path: Path, short_path: Path, fixed: Dict, upload_month: str, s
         merged.drop(columns=[c for c in merged.columns if c.endswith(('_x', '_y'))], inplace=True, errors='ignore')
         df_to_process = merged.drop_duplicates(subset="身分證號").sort_values("身分證號")
 
+    # ... (rest of the file is unchanged)
     records = [build_record(row, fixed, start_date, end_date, segment_type, close_reason, out_encoding) for _, row in
                df_to_process.iterrows()]
     if not records: logging.error("No valid rows to process."); return []
-
     outdir.mkdir(parents=True, exist_ok=True);
     written = []
     suffix = "FM_B.txt" if mode in ["unmatched", "refine"] else "FM.txt"
