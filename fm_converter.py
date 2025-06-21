@@ -160,16 +160,29 @@ def convert(
         rejection_path: Path | None, submitted_path: Path | None
 ) -> List[Path]:
     long_df, short_df = load_csv(long_path), load_csv(short_path)
+
+    # Standardize column names first
     if "身分證字號" in long_df.columns: long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
     if "身分證字號" in short_df.columns: short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
 
+    # --- THIS IS THE DEFINITIVE FIX ---
+    # Before any processing, force the ID columns in both dataframes to be strings.
+    # This prevents pandas from misinterpreting numeric-looking IDs as integers/floats,
+    # which was the root cause of the filtering failure.
+    for df in [long_df, short_df]:
+        if '身分證號' in df.columns:
+            df['身分證號'] = df['身分證號'].astype(str)
+        else:
+            raise ValueError(f"Required column '身分證號' not found in {df.name}. Please check the CSV file.")
+
     if mode in ["unmatched", "refine"]:
+        # The _get_eligible_candidates function will now work correctly because the
+        # data types are guaranteed to be strings.
         eligible_df = _get_eligible_candidates(long_df, short_df)
         if eligible_df.empty: return []
 
-        # Group by the clean ID to ensure correct visit aggregation
-        agg_df = eligible_df.groupby("ID_CLEAN").agg(
-            visit_count=('ID_CLEAN', 'size'),
+        agg_df = eligible_df.groupby(_clean_id(eligible_df['身分證號'])).agg(
+            visit_count=('身分證號', 'size'),
             身分證號=('身分證號', 'first'),
             **{c: (c, 'first') for c in ['姓名', '生日', '住址', '電話']}
         ).reset_index(drop=True)
@@ -189,9 +202,9 @@ def convert(
             if not rejected_rows:
                 logging.warning("Could not find any valid row numbers in the rejection file. No changes will be made.")
                 return []
+
             rejected_ids_clean = {_clean_id(submitted_ids[row - 1]) for row in rejected_rows if
                                   0 < row <= len(submitted_ids)}
-
             submitted_ids_clean = {_clean_id(id) for id in submitted_ids}
             accepted_ids_clean = submitted_ids_clean - rejected_ids_clean
             num_needed = len(submitted_ids) - len(accepted_ids_clean)
@@ -202,7 +215,7 @@ def convert(
             replacements = new_candidates.head(num_needed)
 
             if len(replacements) < num_needed:
-                logging.warning(f"Needed {num_needed} replacements but only found {len(replacements)} new candidates.")
+                logging.warning(f"Needed {num_needed} replacements but only found {len(replacements)}.")
 
             accepted_df = master_candidate_pool[
                 master_candidate_pool['身分證號'].apply(_clean_id).isin(accepted_ids_clean)]
