@@ -3,11 +3,9 @@
 FM Converter – builds fixed‑width Family Physician Integrated Care upload (FM.txt)
 from the pair of source CSVs provided by Taiwan NHI.
 """
-import argparse
 import logging
 from pathlib import Path
-from typing import Dict, List
-import io
+from typing import Dict, List, Set
 
 import chardet  # type: ignore
 import pandas as pd
@@ -16,6 +14,7 @@ import pandas as pd
 RECORD_LEN = 208
 ENCODING = "utf-8"
 BIG5 = "cp950"
+HISTORY_FILE_NAME = "fm_submission_history.txt"
 FIELD_SPECS_DEF = {"SEGMENT": 1, "PLAN_NO": 2, "BRANCH_CODE": 1, "HOSP_ID": 10, "ID": 10, "BIRTHDAY": 8, "NAME": 12,
                    "SEX": 1, "INFORM_ADDR": 120, "TEL": 15, "PRSN_ID": 10, "CASE_TYPE": 1, "CASE_DATE": 8,
                    "CLOSE_DATE": 8, "CLOSE_RSN": 1}
@@ -48,40 +47,36 @@ def _map_sex(id_num: str) -> str:
 
 
 def _clean_id(value: str) -> str:
-    """
-    Robustly cleans an ID string by normalizing full-width characters,
-    stripping whitespace, and forcing uppercase.
-    """
-    if not isinstance(value, str):
-        return ""
-    full_width = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ０１２３４５６７８９"
-    half_width = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    translation_table = str.maketrans(full_width, half_width)
-    normalized_id = value.translate(translation_table)
-    return normalized_id.strip().upper()
+    return str(value).strip().strip("'").upper() if isinstance(value, str) else ""
 
 
-def build_record(row: pd.Series, fixed: Dict, start: str, end: str, seg: str, rsn: str, enc: str) -> bytes:
+def build_record_from_csv(row: pd.Series, fixed: Dict, start: str, end: str, seg: str, rsn: str, enc: str,
+                          case_type: str) -> bytes:
+    """Builds a fixed-width record ONLY from a CSV-derived DataFrame row."""
     bday_roc = str(row.get("生日", "")).strip()
     if not bday_roc: raise ValueError("Missing birthday")
-    case_raw = str(row.get("個案類別", "")).strip("'")
-    case_num = int(case_raw) if case_raw.isdigit() else 0
 
-    # --- THIS IS THE FIX ---
-    # Clean the ID at the last possible moment before it's used, ensuring
-    # the output file contains the standardized, half-width, uppercase ID.
-    id_num = _clean_id(row.get("身分證號", ""))
+    id_num = str(row.get("身分證號", ""))
+    tel_str = str(row.get("電話", "")).strip()
 
     values = {
-        "SEGMENT": seg, "PLAN_NO": fixed["PLAN_NO"], "BRANCH_CODE": fixed["BRANCH_CODE"],
-        "HOSP_ID": fixed["HOSP_ID"], "ID": id_num, "BIRTHDAY": roc_to_gregorian(bday_roc),
-        "NAME": row.get("姓名", ""), "SEX": _map_sex(id_num),  # This now uses the cleaned ID
-        "INFORM_ADDR": row.get("住址", ""), "TEL": str(row.get("電話", "")).strip(),
-        "PRSN_ID": fixed["PRSN_ID"], "CASE_TYPE": CASE_TYPE_MAP.get(case_num, "B"),
+        "SEGMENT": seg,
+        "PLAN_NO": fixed["PLAN_NO"],
+        "BRANCH_CODE": fixed["BRANCH_CODE"],
+        "HOSP_ID": fixed["HOSP_ID"],
+        "ID": id_num,
+        "BIRTHDAY": roc_to_gregorian(bday_roc),
+        "NAME": row.get("姓名", ""),
+        "SEX": _map_sex(id_num),
+        "INFORM_ADDR": row.get("住址", ""),
+        "TEL": tel_str,  # Receives the already-corrected phone number
+        "PRSN_ID": fixed["PRSN_ID"],
+        "CASE_TYPE": case_type,
         "CASE_DATE": start.replace("/", "").replace("-", ""),
         "CLOSE_DATE": end.replace("/", "").replace("-", "") if seg == "B" else "",
         "CLOSE_RSN": rsn if seg == "B" else "",
     }
+
     record = b"".join([_fw(values[k], FIELD_SPECS_DEF[k],
                            "r" if k in ["PLAN_NO", "HOSP_ID", "BIRTHDAY", "PRSN_ID", "CASE_DATE",
                                         "CLOSE_DATE"] else "l", enc) for k in FIELD_SPECS_DEF])
@@ -94,12 +89,19 @@ def chunks(lst: List, n: int):
 
 
 def load_csv(path: Path) -> pd.DataFrame:
+    """
+    Loads a CSV file, forcing columns that might be misinterpreted as numbers (like IDs and phone numbers)
+    to be read as strings to preserve leading zeros and formatting.
+    """
+    sensitive_cols = ['身分證號', '身分證字號', '電話', 'HOSP_ID', '院所代碼', 'PRSN_ID', '醫師身分證字號']
+    dtype_map = {col: str for col in sensitive_cols}
+
     for enc in ["utf-8-sig", "utf-8", "cp950", detect_encoding(path)]:
         try:
-            df = pd.read_csv(path, encoding=enc, dtype=str, index_col=False)
+            df = pd.read_csv(path, encoding=enc, dtype=dtype_map, index_col=False)
             df.columns = [col.strip().lstrip('\ufeff') for col in df.columns]
             return df
-        except Exception:
+        except (UnicodeDecodeError, pd.errors.ParserError):
             continue
     raise ValueError(f"Could not decode or parse {path.name}.")
 
@@ -112,10 +114,9 @@ def merge_sources(long_df, short_df):
 
 def _get_eligible_candidates(long_df: pd.DataFrame, short_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Finds truly unmatched patients using a robust left anti-join. This function now
-    benefits from the powerful _clean_id normalization.
+    Finds all eligible VISITS. The main convert function handles creating a unique, stable patient list.
     """
-    print("Finding eligible candidates using robust merge method...")
+    print("Finding all eligible visits for B-class cases...")
     req_cols = ['身分證號', '姓名', '生日', '住址', '電話']
     if not all(c in long_df.columns for c in req_cols): raise ValueError(
         f"Long CSV missing required columns: {req_cols}")
@@ -123,106 +124,122 @@ def _get_eligible_candidates(long_df: pd.DataFrame, short_df: pd.DataFrame) -> p
 
     for df in [long_df, short_df]:
         df.dropna(subset=['身分證號'], inplace=True)
-        # Use the NEW _clean_id function to create a truly standardized ID
-        df['ID_CLEAN'] = df['身分證號'].apply(_clean_id)
+        df['ID_CLEAN'] = df['身分證號'].astype(str).str.strip().str.upper()
         df.drop(df[df['ID_CLEAN'] == ''].index, inplace=True)
 
     unique_long = long_df.drop_duplicates(subset=['ID_CLEAN'])
     merged = pd.merge(unique_long[['ID_CLEAN']], short_df[['ID_CLEAN']], on='ID_CLEAN', how='left', indicator=True)
     unmatched_ids = set(merged[merged['_merge'] == 'left_only']['ID_CLEAN'])
 
-    if not unmatched_ids:
-        logging.warning("No unmatched patients found.")
-        return pd.DataFrame()
+    if not unmatched_ids: return pd.DataFrame()
 
     eligible_visits = long_df[long_df['ID_CLEAN'].isin(unmatched_ids)].copy()
     eligible_visits.dropna(subset=['電話', '姓名', '生日'], inplace=True)
     eligible_visits = eligible_visits[eligible_visits['電話'].astype(str).str.strip() != '']
-    eligible_visits = eligible_visits[eligible_visits['ID_CLEAN'].apply(_map_sex) != '']
+    eligible_visits = eligible_visits[eligible_visits['身分證號'].apply(_map_sex) != '']
 
-    if eligible_visits.empty:
-        logging.warning("No eligible unmatched patients found after data quality filters.")
-        return pd.DataFrame()
     return eligible_visits
 
 
-def _get_ids_from_fixed_width(path: Path, enc: str) -> List[str]:
-    print(f"Reading previously generated file: {path.name}")
-    id_start, id_len = 14, 10
-    return [line[id_start:id_start + id_len].decode(enc, 'ignore').strip() for line in path.open("rb") if
-            len(line) >= id_start + id_len]
+def _load_history(history_path: Path) -> Set[str]:
+    if not history_path.exists(): return set()
+    with history_path.open("r", encoding="utf-8") as f:
+        return {_clean_id(line) for line in f if line.strip()}
 
 
-def convert(
-        long_path: Path, short_path: Path, fixed: Dict, upload_month: str,
-        start_date: str, end_date: str, segment_type: str, close_reason: str,
-        seq_start: int, out_encoding: str, outdir: Path, mode: str,
-        rejection_path: Path | None, submitted_path: Path | None
-) -> List[Path]:
+def _update_history(history_path: Path, new_ids_to_add: Set[str]):
+    existing_ids = _load_history(history_path)
+    combined_ids = existing_ids.union(new_ids_to_add)
+    print(f"Updating history: {len(existing_ids)} existing, {len(new_ids_to_add)} new, {len(combined_ids)} total.")
+    with history_path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(sorted(list(combined_ids))))
+
+
+def convert(long_path: Path, short_path: Path, fixed: Dict, upload_month: str, start_date: str, end_date: str,
+            segment_type: str, close_reason: str, seq_start: int, out_encoding: str, outdir: Path, mode: str,
+            rejection_path: Path | None, submitted_path: Path | None) -> List[Path]:
     long_df, short_df = load_csv(long_path), load_csv(short_path)
-
-    # Standardize column names first
     if "身分證字號" in long_df.columns: long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
     if "身分證字號" in short_df.columns: short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
 
-    # --- THIS IS THE DEFINITIVE FIX ---
-    # Before any processing, force the ID columns in both dataframes to be strings.
-    # This prevents pandas from misinterpreting numeric-looking IDs as integers/floats,
-    # which was the root cause of the filtering failure.
-    for df in [long_df, short_df]:
-        if '身分證號' in df.columns:
-            df['身分證號'] = df['身分證號'].astype(str)
-        else:
-            raise ValueError(f"Required column '身分證號' not found in {df.name}. Please check the CSV file.")
+    outdir.mkdir(parents=True, exist_ok=True)
+    history_path = outdir / HISTORY_FILE_NAME
+    records = []
 
     if mode in ["unmatched", "refine"]:
-        # The _get_eligible_candidates function will now work correctly because the
-        # data types are guaranteed to be strings.
-        eligible_df = _get_eligible_candidates(long_df, short_df)
-        if eligible_df.empty: return []
+        eligible_visits = _get_eligible_candidates(long_df, short_df)
 
-        agg_df = eligible_df.groupby(_clean_id(eligible_df['身分證號'])).agg(
+        if eligible_visits.empty:
+            if mode == "refine":
+                pass
+            else:
+                logging.warning("No eligible B-class candidates found.")
+                return []
+
+        agg_df = eligible_visits.groupby("身分證號").agg(
             visit_count=('身分證號', 'size'),
-            身分證號=('身分證號', 'first'),
-            **{c: (c, 'first') for c in ['姓名', '生日', '住址', '電話']}
-        ).reset_index(drop=True)
+            姓名=('姓名', 'first'),
+            生日=('生日', 'first'),
+            住址=('住址', 'first'),
+            電話=('電話', 'first'),
+        ).reset_index()
+
+        # --- FINAL BUGFIX: Repair the phone number for B/C modes right after it's corrupted. ---
+        if '電話' in agg_df.columns:
+            tel_series = agg_df['電話'].astype(str).str.replace(r'\.0$', '', regex=True)
+            agg_df['電話'] = tel_series.apply(lambda x: '0' + x if len(x) == 9 else x)
 
         master_candidate_pool = agg_df.sort_values(by=['visit_count', '生日'], ascending=[False, False])
 
         if mode == "refine":
-            if not rejection_path or not submitted_path: raise ValueError(
-                "Submitted and rejection files are required for refine mode.")
+            if not rejection_path or not submitted_path: raise ValueError("Submitted and rejection files are required.")
 
-            submitted_ids = _get_ids_from_fixed_width(submitted_path, out_encoding)
+            print(f"Reading raw bytes from previous submission: {submitted_path.name}")
+            with submitted_path.open('rb') as f:
+                submitted_lines_raw = f.readlines()
+
             rejection_df = load_csv(rejection_path)
             if '上傳序號' not in rejection_df.columns: raise ValueError("Rejection file must have '上傳序號' column.")
 
             cleaned_rows_text = rejection_df['上傳序號'].str.extract(r'(\d+)', expand=False)
-            rejected_rows = pd.to_numeric(cleaned_rows_text, errors='coerce').dropna().astype(int).tolist()
-            if not rejected_rows:
-                logging.warning("Could not find any valid row numbers in the rejection file. No changes will be made.")
-                return []
+            rejected_indices = {int(r) - 1 for r in
+                                pd.to_numeric(cleaned_rows_text, errors='coerce').dropna().astype(int)}
 
-            rejected_ids_clean = {_clean_id(submitted_ids[row - 1]) for row in rejected_rows if
-                                  0 < row <= len(submitted_ids)}
-            submitted_ids_clean = {_clean_id(id) for id in submitted_ids}
-            accepted_ids_clean = submitted_ids_clean - rejected_ids_clean
-            num_needed = len(submitted_ids) - len(accepted_ids_clean)
-            print(f"Found {len(accepted_ids_clean)} accepted patients. Finding {num_needed} new replacements.")
+            accepted_lines = [line for i, line in enumerate(submitted_lines_raw) if i not in rejected_indices]
+            num_needed = len(submitted_lines_raw) - len(accepted_lines)
+            print(
+                f"Analysis: {len(accepted_lines)} accepted patients preserved. Finding {num_needed} new replacements.")
 
-            new_candidates = master_candidate_pool[
-                ~master_candidate_pool['身分證號'].apply(_clean_id).isin(submitted_ids_clean)]
-            replacements = new_candidates.head(num_needed)
+            ever_tried_ids = _load_history(history_path)
+            new_candidates_pool = master_candidate_pool[
+                ~master_candidate_pool['身分證號'].apply(_clean_id).isin(ever_tried_ids)]
+            replacements = new_candidates_pool.head(num_needed)
 
             if len(replacements) < num_needed:
-                logging.warning(f"Needed {num_needed} replacements but only found {len(replacements)}.")
+                logging.warning(f"Needed {num_needed} replacements but only found {len(replacements)} new candidates.")
 
-            accepted_df = master_candidate_pool[
-                master_candidate_pool['身分證號'].apply(_clean_id).isin(accepted_ids_clean)]
-            df_to_process = pd.concat([accepted_df, replacements], ignore_index=True)
+            replacement_records = []
+            if not replacements.empty:
+                newly_added_ids = set(replacements['身分證號'].apply(_clean_id))
+                _update_history(history_path, newly_added_ids)
+                for _, row in replacements.iterrows():
+                    replacement_records.append(
+                        build_record_from_csv(row, fixed, start_date, end_date, segment_type, close_reason,
+                                              out_encoding, "B"))
+
+            records = [line.strip(b'\r\n') for line in accepted_lines] + replacement_records
 
         else:  # mode == "unmatched"
+            if history_path.exists():
+                logging.warning(f"Starting a new 'unmatched' batch. Deleting old history file: {history_path.name}")
+                history_path.unlink()
             df_to_process = master_candidate_pool.head(200)
+            if not df_to_process.empty:
+                initial_ids = set(df_to_process['身分證號'].apply(_clean_id))
+                _update_history(history_path, initial_ids)
+                for _, row in df_to_process.iterrows():
+                    records.append(build_record_from_csv(row, fixed, start_date, end_date, segment_type, close_reason,
+                                                         out_encoding, "B"))
 
     else:  # mode == "matched"
         merged = merge_sources(long_df, short_df)
@@ -233,17 +250,29 @@ def convert(
         merged.drop(columns=[c for c in merged.columns if c.endswith(('_x', '_y'))], inplace=True, errors='ignore')
         df_to_process = merged.drop_duplicates(subset="身分證號").sort_values("身分證號")
 
-    records = [build_record(row, fixed, start_date, end_date, segment_type, close_reason, out_encoding) for _, row in
-               df_to_process.iterrows()]
-    if not records: logging.error("No valid rows to process."); return []
-    outdir.mkdir(parents=True, exist_ok=True);
+        # --- FINAL BUGFIX: Apply the same robust phone number fix to the Mode A dataframe. ---
+        if '電話' in df_to_process.columns:
+            tel_series = df_to_process['電話'].astype(str).str.replace(r'\.0$', '', regex=True)
+            df_to_process['電話'] = tel_series.apply(lambda x: '0' + x if len(x) == 9 else x)
+
+        for _, row in df_to_process.iterrows():
+            case_num = int(str(row.get("個案類別", "0")).strip("'") or "0")
+            row_case_type = CASE_TYPE_MAP.get(case_num, "B")
+            records.append(
+                build_record_from_csv(row, fixed, start_date, end_date, segment_type, close_reason, out_encoding,
+                                      row_case_type))
+
+    if not records:
+        logging.error("No valid rows to process.")
+        return []
+
     written = []
     suffix = "FM_B.txt" if mode in ["unmatched", "refine"] else "FM.txt"
     chunk_size = 200 if mode in ["unmatched", "refine"] else 9999
     for i, chunk in enumerate(chunks(records, chunk_size), start=seq_start):
         fpath = outdir / f"{fixed['BRANCH_CODE']}{fixed['HOSP_ID']}{upload_month}{i:02d}{suffix}"
         with fpath.open("wb") as fh: fh.writelines(rec + b"\r\n" for rec in chunk)
-        written.append(fpath);
+        written.append(fpath)
         print(f"Wrote {len(chunk)} rows to {fpath.name}")
     return written
 

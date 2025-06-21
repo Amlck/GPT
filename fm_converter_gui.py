@@ -10,7 +10,7 @@ import fm_converter
 class ConverterGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title("FM Converter v2.5.1")
+        root.title("FM Converter v2.6.0")
 
         # --- Task Selection ---
         task_frame = tk.LabelFrame(root, text="Task", padx=10, pady=5)
