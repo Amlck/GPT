@@ -145,6 +145,9 @@ def convert(
     if "身分證字號" in short_df.columns: short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
 
     if mode in ["unmatched", "refine"]:
+        # --- B-CLASS GENERATION LOGIC ---
+
+        # 1. Get the full, sorted master list of all possible candidates. This is our "queue".
         eligible_df = _get_eligible_candidates(long_df, short_df)
         if eligible_df.empty: return []
         agg_df = eligible_df.groupby("身分證號").agg(
@@ -153,62 +156,50 @@ def convert(
         master_candidate_pool = agg_df.sort_values(by=['visit_count', '生日'], ascending=[False, False])
 
         if mode == "refine":
-            if not rejection_path or not submitted_path: raise ValueError("Submitted and rejection files are required.")
+            # --- REWRITTEN & CORRECTED REFINE LOGIC ---
+            if not rejection_path or not submitted_path: raise ValueError(
+                "Submitted and rejection files are required for refine mode.")
 
+            # A. Get IDs from the last submission and the rejection list
             submitted_ids = _get_ids_from_fixed_width(submitted_path, out_encoding)
             rejection_df = load_csv(rejection_path)
+            if '上傳序號' not in rejection_df.columns: raise ValueError("Rejection file must have '上傳序號' column.")
 
-            # --- START: NEW DIAGNOSTIC AND ROBUST CLEANING BLOCK ---
-
-            print("\n--- REJECTION FILE DIAGNOSTICS ---")
-            print("Columns found in rejection file:", rejection_df.columns.tolist())
-
-            if '上傳序號' not in rejection_df.columns:
-                raise ValueError("Rejection file must have '上傳序號' column. Check spelling/hidden characters.")
-
-            print("First 5 raw values of '上傳序號' column:")
-            print(rejection_df['上傳序號'].head().to_string())
-            print("----------------------------------\n")
-
-            # More robust cleaning: extracts both standard and full-width numbers.
-            cleaned_rows_text = rejection_df['上傳序號'].str.extract(r'([0-9０-９]+)', expand=False)
-
-            print("\n--- CLEANING DIAGNOSTICS ---")
-            print("Result of extracting digits (first 5 values):")
-            print(cleaned_rows_text.head().to_string())
-            print("----------------------------\n")
-
+            # B. Reliably identify the rejected IDs
+            cleaned_rows_text = rejection_df['上傳序號'].str.extract(r'(\d+)', expand=False)
             rejected_rows = pd.to_numeric(cleaned_rows_text, errors='coerce').dropna().astype(int).tolist()
-
-            # --- END: NEW DIAGNOSTIC BLOCK ---
-
             if not rejected_rows:
                 logging.warning("Could not find any valid row numbers in the rejection file. No changes will be made.")
                 return []
-
             rejected_ids_clean = {_clean_id(submitted_ids[row - 1]) for row in rejected_rows if
                                   0 < row <= len(submitted_ids)}
 
+            # C. Identify the keepers (accepted patients) and how many replacements are needed
             submitted_ids_clean = {_clean_id(id) for id in submitted_ids}
             accepted_ids_clean = submitted_ids_clean - rejected_ids_clean
             num_needed = len(submitted_ids) - len(accepted_ids_clean)
+            print(f"Found {len(accepted_ids_clean)} accepted patients. Finding {num_needed} new replacements.")
 
-            print(f"Found {len(accepted_ids_clean)} accepted patients. Need to find {num_needed} replacements.")
-
+            # D. Find new candidates from the master pool who were NOT in the last submission
             new_candidates = master_candidate_pool[
                 ~master_candidate_pool['身分證號'].apply(_clean_id).isin(submitted_ids_clean)]
             replacements = new_candidates.head(num_needed)
-            if len(replacements) < num_needed: logging.warning(
-                f"Needed {num_needed} replacements but only found {len(replacements)} new candidates.")
 
+            if len(replacements) < num_needed:
+                logging.warning(
+                    f"Needed {num_needed} replacements but only found {len(replacements)} new candidates in the queue.")
+
+            # E. Combine the accepted patients with the new replacements to form the new batch
             accepted_df = master_candidate_pool[
                 master_candidate_pool['身分證號'].apply(_clean_id).isin(accepted_ids_clean)]
             df_to_process = pd.concat([accepted_df, replacements], ignore_index=True)
+            print(f"Assembled new batch with {len(df_to_process)} patients.")
 
-        else:  # mode == "unmatched"
+        else:  # mode == "unmatched" (First batch)
             df_to_process = master_candidate_pool.head(200)
 
     else:  # mode == "matched"
+        # ... (original matched logic is unchanged)
         merged = merge_sources(long_df, short_df)
         rename_map = {'姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話', '看診日期_y': '看診日期',
                       '身分證號_x': '身分證號', '生日_x': '生日', '個案類別_x': '個案類別'}
@@ -217,7 +208,7 @@ def convert(
         merged.drop(columns=[c for c in merged.columns if c.endswith(('_x', '_y'))], inplace=True, errors='ignore')
         df_to_process = merged.drop_duplicates(subset="身分證號").sort_values("身分證號")
 
-    # ... (rest of the file is unchanged)
+    # ... (record building and file writing logic remains the same)
     records = [build_record(row, fixed, start_date, end_date, segment_type, close_reason, out_encoding) for _, row in
                df_to_process.iterrows()]
     if not records: logging.error("No valid rows to process."); return []
