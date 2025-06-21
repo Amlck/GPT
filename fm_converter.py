@@ -48,7 +48,23 @@ def _map_sex(id_num: str) -> str:
 
 
 def _clean_id(value: str) -> str:
-    return str(value).strip().strip("'").upper() if isinstance(value, str) else ""
+    """
+    Robustly cleans an ID string by normalizing full-width characters,
+    stripping whitespace, and forcing uppercase.
+    """
+    if not isinstance(value, str):
+        return ""
+
+    # Define full-width and half-width characters for normalization
+    full_width = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ０１２３４５６７８９"
+    half_width = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+    # Create the translation table
+    translation_table = str.maketrans(full_width, half_width)
+
+    # Normalize, then clean
+    normalized_id = value.translate(translation_table)
+    return normalized_id.strip().upper()
 
 
 def build_record(row: pd.Series, fixed: Dict, start: str, end: str, seg: str, rsn: str, enc: str) -> bytes:
@@ -97,8 +113,8 @@ def merge_sources(long_df, short_df):
 
 def _get_eligible_candidates(long_df: pd.DataFrame, short_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Finds truly unmatched patients using a robust left anti-join.
-    This version ensures the ID_CLEAN column is created and used consistently.
+    Finds truly unmatched patients using a robust left anti-join. This function now
+    benefits from the powerful _clean_id normalization.
     """
     print("Finding eligible candidates using robust merge method...")
     req_cols = ['身分證號', '姓名', '生日', '住址', '電話']
@@ -108,8 +124,8 @@ def _get_eligible_candidates(long_df: pd.DataFrame, short_df: pd.DataFrame) -> p
 
     for df in [long_df, short_df]:
         df.dropna(subset=['身分證號'], inplace=True)
-        # Create the standardized ID column used for all joins and groupings
-        df['ID_CLEAN'] = df['身分證號'].astype(str).str.strip().str.upper()
+        # Use the NEW _clean_id function to create a truly standardized ID
+        df['ID_CLEAN'] = df['身分證號'].apply(_clean_id)
         df.drop(df[df['ID_CLEAN'] == ''].index, inplace=True)
 
     unique_long = long_df.drop_duplicates(subset=['ID_CLEAN'])
@@ -152,16 +168,12 @@ def convert(
         eligible_df = _get_eligible_candidates(long_df, short_df)
         if eligible_df.empty: return []
 
-        # --- THIS IS THE FIX ---
-        # We now group by the standardized 'ID_CLEAN' column to ensure accuracy.
+        # Group by the clean ID to ensure correct visit aggregation
         agg_df = eligible_df.groupby("ID_CLEAN").agg(
             visit_count=('ID_CLEAN', 'size'),
-            # Also pull the original '身分證號' to preserve it for the output record.
             身分證號=('身分證號', 'first'),
             **{c: (c, 'first') for c in ['姓名', '生日', '住址', '電話']}
-        ).reset_index()
-        # The main ID column for the rest of the process is now the original, preserved one.
-        agg_df.rename(columns={'ID_CLEAN': 'MERGE_ID'}, inplace=True)
+        ).reset_index(drop=True)
 
         master_candidate_pool = agg_df.sort_values(by=['visit_count', '生日'], ascending=[False, False])
 
@@ -186,7 +198,6 @@ def convert(
             num_needed = len(submitted_ids) - len(accepted_ids_clean)
             print(f"Found {len(accepted_ids_clean)} accepted patients. Finding {num_needed} new replacements.")
 
-            # This filter now works correctly on the clean master list.
             new_candidates = master_candidate_pool[
                 ~master_candidate_pool['身分證號'].apply(_clean_id).isin(submitted_ids_clean)]
             replacements = new_candidates.head(num_needed)
