@@ -79,25 +79,14 @@ def chunks(lst: List, n: int):
 
 
 def load_csv(path: Path) -> pd.DataFrame:
-    """
-    Robustly loads a CSV, trying multiple encodings, cleaning column
-    headers, and preventing pandas from incorrectly auto-indexing.
-    """
-    encodings_to_try = ["utf-8-sig", "utf-8", "cp950", detect_encoding(path)]
-    for encoding in encodings_to_try:
+    for enc in ["utf-8-sig", "utf-8", "cp950", detect_encoding(path)]:
         try:
-            # --- THIS IS THE FIX ---
-            # index_col=False forces pandas to treat all columns as data,
-            # preventing it from mistakenly using the first column as row labels.
-            df = pd.read_csv(path, encoding=encoding, dtype=str, index_col=False)
-
-            # Clean column headers of whitespace and BOM
+            df = pd.read_csv(path, encoding=enc, dtype=str, index_col=False)
             df.columns = [col.strip().lstrip('\ufeff') for col in df.columns]
             return df
         except Exception:
             continue
-
-    raise ValueError(f"Could not decode or parse {path.name} with any attempted encoding.")
+    raise ValueError(f"Could not decode or parse {path.name}.")
 
 
 def merge_sources(long_df, short_df):
@@ -107,24 +96,35 @@ def merge_sources(long_df, short_df):
 
 
 def _get_eligible_candidates(long_df: pd.DataFrame, short_df: pd.DataFrame) -> pd.DataFrame:
-    print("Filtering for eligible candidates...")
+    """Finds truly unmatched patients using a robust left anti-join."""
+    print("Finding eligible candidates using robust merge method...")
     req_cols = ['身分證號', '姓名', '生日', '住址', '電話']
     if not all(c in long_df.columns for c in req_cols): raise ValueError(
         f"Long CSV missing required columns: {req_cols}")
     if '身分證號' not in short_df.columns: raise ValueError("Short CSV missing '身分證號'.")
 
-    for df in [long_df, short_df]: df.dropna(subset=['身分證號'], inplace=True); df['身分證號'] = df['身分證號'].astype(
-        str).str.strip()
-    long_df.dropna(subset=['電話', '姓名', '生日'], inplace=True);
-    long_df = long_df[long_df['電話'].astype(str).str.strip() != '']
+    for df in [long_df, short_df]:
+        df.dropna(subset=['身分證號'], inplace=True)
+        df['ID_CLEAN'] = df['身分證號'].astype(str).str.strip().str.upper()
+        df.drop(df[df['ID_CLEAN'] == ''].index, inplace=True)
 
-    short_ids = set(short_df['身分證號'].apply(_clean_id));
-    short_ids.discard("")
-    eligible = long_df[~long_df['身分證號'].apply(_clean_id).isin(short_ids)].copy()
-    eligible = eligible[eligible['身分證號'].apply(_map_sex) != '']
+    unique_long = long_df.drop_duplicates(subset=['ID_CLEAN'])
+    merged = pd.merge(unique_long[['ID_CLEAN']], short_df[['ID_CLEAN']], on='ID_CLEAN', how='left', indicator=True)
+    unmatched_ids = set(merged[merged['_merge'] == 'left_only']['ID_CLEAN'])
 
-    if eligible.empty: logging.warning("No eligible unmatched patients found."); return pd.DataFrame()
-    return eligible
+    if not unmatched_ids:
+        logging.warning("No unmatched patients found.")
+        return pd.DataFrame()
+
+    eligible_visits = long_df[long_df['ID_CLEAN'].isin(unmatched_ids)].copy()
+    eligible_visits.dropna(subset=['電話', '姓名', '生日'], inplace=True)
+    eligible_visits = eligible_visits[eligible_visits['電話'].astype(str).str.strip() != '']
+    eligible_visits = eligible_visits[eligible_visits['身分證號'].apply(_map_sex) != '']
+
+    if eligible_visits.empty:
+        logging.warning("No eligible unmatched patients found after data quality filters.")
+        return pd.DataFrame()
+    return eligible_visits
 
 
 def _get_ids_from_fixed_width(path: Path, enc: str) -> List[str]:
@@ -134,38 +134,27 @@ def _get_ids_from_fixed_width(path: Path, enc: str) -> List[str]:
             len(line) >= id_start + id_len]
 
 
-def convert(
-        long_path: Path, short_path: Path, fixed: Dict, upload_month: str,
-        start_date: str, end_date: str, segment_type: str, close_reason: str,
-        seq_start: int, out_encoding: str, outdir: Path, mode: str,
-        rejection_path: Path | None, submitted_path: Path | None
-) -> List[Path]:
+def convert(long_path: Path, short_path: Path, fixed: Dict, upload_month: str, start_date: str, end_date: str,
+            segment_type: str, close_reason: str, seq_start: int, out_encoding: str, outdir: Path, mode: str,
+            rejection_path: Path | None, submitted_path: Path | None) -> List[Path]:
     long_df, short_df = load_csv(long_path), load_csv(short_path)
     if "身分證字號" in long_df.columns: long_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
     if "身分證字號" in short_df.columns: short_df.rename(columns={"身分證字號": "身分證號"}, inplace=True)
 
     if mode in ["unmatched", "refine"]:
-        # --- B-CLASS GENERATION LOGIC ---
-
-        # 1. Get the full, sorted master list of all possible candidates. This is our "queue".
         eligible_df = _get_eligible_candidates(long_df, short_df)
         if eligible_df.empty: return []
-        agg_df = eligible_df.groupby("身分證號").agg(
-            visit_count=('身分證號', 'size'), **{c: (c, 'first') for c in ['姓名', '生日', '住址', '電話']}
-        ).reset_index()
+        agg_df = eligible_df.groupby("身分證號").agg(visit_count=('身分證號', 'size'), **{c: (c, 'first') for c in
+                                                                                          ['姓名', '生日', '住址',
+                                                                                           '電話']}).reset_index()
         master_candidate_pool = agg_df.sort_values(by=['visit_count', '生日'], ascending=[False, False])
 
         if mode == "refine":
-            # --- REWRITTEN & CORRECTED REFINE LOGIC ---
-            if not rejection_path or not submitted_path: raise ValueError(
-                "Submitted and rejection files are required for refine mode.")
-
-            # A. Get IDs from the last submission and the rejection list
+            if not rejection_path or not submitted_path: raise ValueError("Submitted and rejection files are required.")
             submitted_ids = _get_ids_from_fixed_width(submitted_path, out_encoding)
             rejection_df = load_csv(rejection_path)
             if '上傳序號' not in rejection_df.columns: raise ValueError("Rejection file must have '上傳序號' column.")
 
-            # B. Reliably identify the rejected IDs
             cleaned_rows_text = rejection_df['上傳序號'].str.extract(r'(\d+)', expand=False)
             rejected_rows = pd.to_numeric(cleaned_rows_text, errors='coerce').dropna().astype(int).tolist()
             if not rejected_rows:
@@ -174,32 +163,25 @@ def convert(
             rejected_ids_clean = {_clean_id(submitted_ids[row - 1]) for row in rejected_rows if
                                   0 < row <= len(submitted_ids)}
 
-            # C. Identify the keepers (accepted patients) and how many replacements are needed
             submitted_ids_clean = {_clean_id(id) for id in submitted_ids}
             accepted_ids_clean = submitted_ids_clean - rejected_ids_clean
             num_needed = len(submitted_ids) - len(accepted_ids_clean)
             print(f"Found {len(accepted_ids_clean)} accepted patients. Finding {num_needed} new replacements.")
 
-            # D. Find new candidates from the master pool who were NOT in the last submission
             new_candidates = master_candidate_pool[
                 ~master_candidate_pool['身分證號'].apply(_clean_id).isin(submitted_ids_clean)]
             replacements = new_candidates.head(num_needed)
+            if len(replacements) < num_needed: logging.warning(
+                f"Needed {num_needed} replacements but only found {len(replacements)} new candidates.")
 
-            if len(replacements) < num_needed:
-                logging.warning(
-                    f"Needed {num_needed} replacements but only found {len(replacements)} new candidates in the queue.")
-
-            # E. Combine the accepted patients with the new replacements to form the new batch
             accepted_df = master_candidate_pool[
                 master_candidate_pool['身分證號'].apply(_clean_id).isin(accepted_ids_clean)]
             df_to_process = pd.concat([accepted_df, replacements], ignore_index=True)
-            print(f"Assembled new batch with {len(df_to_process)} patients.")
 
-        else:  # mode == "unmatched" (First batch)
+        else:  # mode == "unmatched"
             df_to_process = master_candidate_pool.head(200)
 
     else:  # mode == "matched"
-        # ... (original matched logic is unchanged)
         merged = merge_sources(long_df, short_df)
         rename_map = {'姓名_y': '姓名', '住址_y': '住址', '電話_y': '電話', '看診日期_y': '看診日期',
                       '身分證號_x': '身分證號', '生日_x': '生日', '個案類別_x': '個案類別'}
@@ -208,10 +190,10 @@ def convert(
         merged.drop(columns=[c for c in merged.columns if c.endswith(('_x', '_y'))], inplace=True, errors='ignore')
         df_to_process = merged.drop_duplicates(subset="身分證號").sort_values("身分證號")
 
-    # ... (record building and file writing logic remains the same)
     records = [build_record(row, fixed, start_date, end_date, segment_type, close_reason, out_encoding) for _, row in
                df_to_process.iterrows()]
     if not records: logging.error("No valid rows to process."); return []
+
     outdir.mkdir(parents=True, exist_ok=True);
     written = []
     suffix = "FM_B.txt" if mode in ["unmatched", "refine"] else "FM.txt"
@@ -226,7 +208,6 @@ def convert(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
-    # Basic CLI support can be added here if needed in the future.
     print("This script is intended to be run via its GUI. Please run fm_converter_gui.py")
 
 
