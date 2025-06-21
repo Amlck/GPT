@@ -54,15 +54,9 @@ def _clean_id(value: str) -> str:
     """
     if not isinstance(value, str):
         return ""
-
-    # Define full-width and half-width characters for normalization
     full_width = "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ０１２３４５６７８９"
     half_width = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-    # Create the translation table
     translation_table = str.maketrans(full_width, half_width)
-
-    # Normalize, then clean
     normalized_id = value.translate(translation_table)
     return normalized_id.strip().upper()
 
@@ -72,13 +66,18 @@ def build_record(row: pd.Series, fixed: Dict, start: str, end: str, seg: str, rs
     if not bday_roc: raise ValueError("Missing birthday")
     case_raw = str(row.get("個案類別", "")).strip("'")
     case_num = int(case_raw) if case_raw.isdigit() else 0
-    id_num = row.get("身分證號", "")
+
+    # --- THIS IS THE FIX ---
+    # Clean the ID at the last possible moment before it's used, ensuring
+    # the output file contains the standardized, half-width, uppercase ID.
+    id_num = _clean_id(row.get("身分證號", ""))
+
     values = {
         "SEGMENT": seg, "PLAN_NO": fixed["PLAN_NO"], "BRANCH_CODE": fixed["BRANCH_CODE"],
         "HOSP_ID": fixed["HOSP_ID"], "ID": id_num, "BIRTHDAY": roc_to_gregorian(bday_roc),
-        "NAME": row.get("姓名", ""), "SEX": _map_sex(id_num), "INFORM_ADDR": row.get("住址", ""),
-        "TEL": str(row.get("電話", "")).strip(), "PRSN_ID": fixed["PRSN_ID"],
-        "CASE_TYPE": CASE_TYPE_MAP.get(case_num, "B"),
+        "NAME": row.get("姓名", ""), "SEX": _map_sex(id_num),  # This now uses the cleaned ID
+        "INFORM_ADDR": row.get("住址", ""), "TEL": str(row.get("電話", "")).strip(),
+        "PRSN_ID": fixed["PRSN_ID"], "CASE_TYPE": CASE_TYPE_MAP.get(case_num, "B"),
         "CASE_DATE": start.replace("/", "").replace("-", ""),
         "CLOSE_DATE": end.replace("/", "").replace("-", "") if seg == "B" else "",
         "CLOSE_RSN": rsn if seg == "B" else "",
